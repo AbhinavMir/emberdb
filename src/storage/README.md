@@ -108,3 +108,78 @@ Imagine you're a nurse monitoring patients in a hospital:
 2. **Efficiency**: Similar to having filing cabinets for different time periods instead of one huge pile of papers
 3. **Safety**: Built-in checks ensure data is stored correctly and can be found reliably
 4. **Space Management**: Old data can be compressed to save space, like archiving old medical records
+
+### Testing
+
+The storage system includes comprehensive tests to ensure reliability and correctness. Here's what we test for:
+
+#### 1. Basic Operations
+```rust
+#[test]
+fn test_basic_chunk_operations()
+```
+- Creating new TimeChunks
+- Adding records
+- Retrieving metric lists
+
+#### 2. Time Range Validation
+```rust
+#[test]
+fn test_time_range_validation()
+```
+- Rejects records before chunk's start time
+- Rejects records after chunk's end time
+- Accepts records within valid time range
+
+#### 3. Metric Retrieval
+```rust
+#[test]
+fn test_metric_retrieval()
+```
+- Getting all records for a specific metric
+- Getting latest values
+- Handling non-existent metrics
+- Verifying record order
+
+#### 4. Range Queries
+```rust
+#[test]
+fn test_range_queries()
+```
+- Finding records within time windows
+- Handling empty results
+- Proper time-based filtering
+
+#### 5. Statistical Operations
+```rust
+#[test]
+fn test_chunk_summary()
+```
+- Calculating min/max/average values
+- Record counting
+- Statistical accuracy
+
+#### 6. Data Management
+```rust
+#[test]
+fn test_chunk_merge()
+#[test]
+fn test_compression_state()
+```
+- Merging overlapping chunks
+- Compression operations
+- Data integrity during transformations
+
+#### 7. Validation
+```rust
+#[test]
+fn test_validation()
+```
+- Time range validity
+- Data integrity checks
+- Configuration validation
+
+To run the tests:
+```bash
+cargo test --package emberdb --lib storage
+```
