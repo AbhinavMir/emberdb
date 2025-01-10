@@ -1,0 +1,20 @@
+[package]
+name = "emberdb"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name"]
+description = "A FHIR-optimized time-series database"
+
+[lib]
+name = "emberdb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "emberdb"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"  # For benchmarking
+pretty_assertions = "1.4"  # For more readable test failures
