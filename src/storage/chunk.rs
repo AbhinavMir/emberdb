@@ -10,6 +10,7 @@ pub enum CompressionState {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ChunkMetadata {
     created_at: i64,
     last_access: i64,
@@ -86,11 +87,9 @@ impl TimeChunk {
     }
 
     pub fn get_size(&self) -> usize {
-        // Rough estimation of memory usage
-        self.metadata.size_bytes = self.records.iter().fold(0, |acc, (k, v)| {
+        self.records.iter().fold(0, |acc, (k, v)| {
             acc + k.len() + (v.len() * std::mem::size_of::<Record>())
-        });
-        self.metadata.size_bytes
+        })
     }
 
     pub fn get_range(&mut self, start: i64, end: i64, metric: &str) -> Result<Vec<&Record>> {
@@ -218,8 +217,8 @@ impl TimeChunk {
 
 #[derive(Debug)]
 pub struct ChunkSummary {
-    count: usize,
-    min: f64,
-    max: f64,
-    avg: f64,
+    pub count: usize,
+    pub min: f64,
+    pub max: f64,
+    pub avg: f64,
 }
