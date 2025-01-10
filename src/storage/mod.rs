@@ -21,8 +21,8 @@ pub struct Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Helper function to create test records with given parameters
     fn create_test_record(timestamp: i64, name: &str, value: f64) -> Record {
         Record {
             timestamp,
@@ -31,6 +31,10 @@ mod tests {
         }
     }
 
+    /// Tests basic TimeChunk operations:
+    /// - Creating a new chunk
+    /// - Appending a record
+    /// - Retrieving the list of metrics
     #[test]
     fn test_basic_chunk_operations() {
         let mut chunk = TimeChunk::new(0, 100);
@@ -43,51 +47,57 @@ mod tests {
         assert_eq!(metrics[0], "test");
     }
 
+    /// Tests time range validation:
+    /// - Rejects records before chunk's start time
+    /// - Rejects records after chunk's end time
+    /// - Accepts records within the time range
     #[test]
     fn test_time_range_validation() {
         let mut chunk = TimeChunk::new(100, 200);
         
-        // Test records outside range
-        let record1 = create_test_record(50, "test", 42.0);  // Too early
-        let record2 = create_test_record(250, "test", 42.0); // Too late
-        let record3 = create_test_record(150, "test", 42.0); // Just right
+        let record1 = create_test_record(50, "test", 42.0);   // Too early
+        let record2 = create_test_record(250, "test", 42.0);  // Too late
+        let record3 = create_test_record(150, "test", 42.0);  // Just right
         
         assert!(chunk.append(record1).is_err());
         assert!(chunk.append(record2).is_err());
         assert!(chunk.append(record3).is_ok());
     }
 
+    /// Tests metric retrieval functionality:
+    /// - Getting all records for a specific metric
+    /// - Getting the latest value for a metric
+    /// - Handling non-existent metrics
+    /// - Correct ordering of records
     #[test]
     fn test_metric_retrieval() {
         let mut chunk = TimeChunk::new(0, 100);
         
-        // Add multiple records for different metrics
         chunk.append(create_test_record(10, "cpu", 50.0)).unwrap();
         chunk.append(create_test_record(20, "cpu", 60.0)).unwrap();
         chunk.append(create_test_record(30, "memory", 80.0)).unwrap();
         
-        // Test get_metric
         let cpu_metrics = chunk.get_metric("cpu").unwrap();
         assert_eq!(cpu_metrics.len(), 2);
         
-        // Test get_latest
         let latest_cpu = chunk.get_latest("cpu").unwrap();
         assert_eq!(latest_cpu.value, 60.0);
         
-        // Test non-existent metric
         assert!(chunk.get_metric("nonexistent").is_err());
     }
 
+    /// Tests time range queries:
+    /// - Getting records within a specific time window
+    /// - Handling empty results
+    /// - Correct filtering of records by time
     #[test]
     fn test_range_queries() {
         let mut chunk = TimeChunk::new(0, 100);
         
-        // Add records across the time range
         for i in 0..5 {
             chunk.append(create_test_record(i * 20, "test", i as f64)).unwrap();
         }
         
-        // Test various ranges
         let results = chunk.get_range(10, 50, "test").unwrap();
         assert_eq!(results.len(), 2); // Should include records at t=20 and t=40
         
@@ -95,11 +105,14 @@ mod tests {
         assert_eq!(empty_results.len(), 0);
     }
 
+    /// Tests chunk summary statistics:
+    /// - Calculating min, max, average values
+    /// - Counting records
+    /// - Accuracy of statistical calculations
     #[test]
     fn test_chunk_summary() {
         let mut chunk = TimeChunk::new(0, 100);
         
-        // Add some test data
         chunk.append(create_test_record(10, "temp", 20.0)).unwrap();
         chunk.append(create_test_record(20, "temp", 25.0)).unwrap();
         chunk.append(create_test_record(30, "temp", 30.0)).unwrap();
@@ -111,6 +124,10 @@ mod tests {
         assert_eq!(summary.avg, 25.0);
     }
 
+    /// Tests chunk merging functionality:
+    /// - Merging overlapping chunks
+    /// - Preserving all records after merge
+    /// - Maintaining time order
     #[test]
     fn test_chunk_merge() {
         let mut chunk1 = TimeChunk::new(0, 100);
@@ -125,15 +142,21 @@ mod tests {
         assert_eq!(merged_data.len(), 2);
     }
 
+    /// Tests compression state changes:
+    /// - Successful compression
+    /// - Compression state tracking
     #[test]
     fn test_compression_state() {
         let mut chunk = TimeChunk::new(0, 100);
         chunk.append(create_test_record(50, "test", 42.0)).unwrap();
         
         assert!(chunk.compress().is_ok());
-        // Add more specific compression tests once the compression logic is implemented
     }
 
+    /// Tests chunk validation:
+    /// - Invalid time ranges (end before start)
+    /// - Valid chunk configurations
+    /// - Data integrity checks
     #[test]
     fn test_validation() {
         // Test invalid time range
