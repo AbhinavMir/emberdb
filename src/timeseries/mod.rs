@@ -5,6 +5,8 @@
 //! - Data rollups and aggregation
 //! - Time-based partitioning
 
+pub mod query;
+
 #[cfg(test)]
 mod tests {
     #[test]

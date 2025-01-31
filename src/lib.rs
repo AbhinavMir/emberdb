@@ -8,8 +8,10 @@ pub mod storage;
 pub mod timeseries; 
 
 use std::collections::HashMap;
-use crate::storage::TimeChunk;
-use crate::storage::ChunkError;
+use std::sync::RwLock;
+use std::time::Duration;
+use crate::storage::{TimeChunk, Record, ChunkError};
+use crate::config::Config;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -20,9 +22,10 @@ pub enum Value {
 
 #[derive(Debug)]
 pub enum StorageError {
-    ChunkNotFound,
+    ChunkNotFound(String),
     ChunkError(ChunkError),
-    InvalidTimeRange,
+    InvalidTimeRange(String),
+    ConfigError(String),
 }
 
 impl From<ChunkError> for StorageError {
@@ -33,41 +36,91 @@ impl From<ChunkError> for StorageError {
 
 #[derive(Debug)]
 pub struct StorageEngine {
-    // For now, just keep everything in memory
-    chunks: HashMap<i64, TimeChunk>,  // Use TimeChunk directly
+    chunks: RwLock<HashMap<i64, TimeChunk>>,
+    chunk_duration: Duration,
 }
 
 impl StorageEngine {
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         StorageEngine {
-            chunks: HashMap::new(),
+            chunks: RwLock::new(HashMap::new()),
+            chunk_duration: config.chunk_duration,
         }
     }
 
-    pub fn insert(&mut self, record: storage::Record) -> Result<(), StorageError> {
-        // Determine which chunk this belongs to
+    pub fn insert(&self, record: Record) -> Result<(), StorageError> {
         let chunk_id = self.get_chunk_id(record.timestamp);
+        let mut chunks = self.chunks.write().unwrap();
         
         // Create new chunk if needed
-        if !self.chunks.contains_key(&chunk_id) {
+        if !chunks.contains_key(&chunk_id) {
             let start_time = chunk_id;
-            let end_time = start_time + self.chunk_duration();
-            self.chunks.insert(chunk_id, TimeChunk::new(start_time, end_time));
+            let end_time = start_time + self.chunk_duration.as_secs() as i64;
+            chunks.insert(chunk_id, TimeChunk::new(start_time, end_time));
         }
 
         // Insert into appropriate chunk
-        self.chunks.get_mut(&chunk_id)
-            .ok_or(StorageError::ChunkNotFound)?
+        chunks.get_mut(&chunk_id)
+            .ok_or_else(|| StorageError::ChunkNotFound("Chunk not found after creation".to_string()))?
             .append(record)
-            .map_err(StorageError::ChunkError)
+            .map_err(StorageError::from)
     }
 
-    fn chunk_duration(&self) -> i64 {
-        3600 // 1 hour in seconds
+    pub fn query_range(&self, start: i64, end: i64, metric: &str) -> Result<Vec<Record>, StorageError> {
+        if start >= end {
+            return Err(StorageError::InvalidTimeRange("Start time must be before end time".to_string()));
+        }
+
+        let chunks = self.chunks.read().unwrap();
+        let mut results = Vec::new();
+
+        // Find all chunks that overlap with the query range
+        let start_chunk = self.get_chunk_id(start);
+        let end_chunk = self.get_chunk_id(end);
+
+        for chunk_id in (start_chunk..=end_chunk).step_by(self.chunk_duration.as_secs() as usize) {
+            if let Some(chunk) = chunks.get(&chunk_id) {
+                let records = chunk.get_range(start, end, metric)
+                    .map_err(StorageError::from)?;
+                results.extend(records.into_iter().cloned());
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn get_latest(&self, metric: &str) -> Result<Record, StorageError> {
+        let chunks = self.chunks.read().unwrap();
+        let mut latest: Option<&Record> = None;
+        
+        // Search through chunks in reverse chronological order
+        for chunk in chunks.values() {
+            if let Ok(record) = chunk.get_latest(metric) {
+                if latest.is_none() || record.timestamp > latest.unwrap().timestamp {
+                    latest = Some(record);
+                }
+            }
+        }
+
+        latest.cloned()
+            .ok_or_else(|| StorageError::ChunkNotFound("No data found for metric".to_string()))
     }
 
     fn get_chunk_id(&self, timestamp: i64) -> i64 {
-        // Round down to nearest hour
-        timestamp - (timestamp % self.chunk_duration())
+        // Round down to nearest chunk boundary
+        timestamp - (timestamp % self.chunk_duration.as_secs() as i64)
+    }
+
+    pub fn cleanup_old_chunks(&self, retention: Duration) -> Result<(), StorageError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+            
+        let cutoff = now - retention.as_secs() as i64;
+        let mut chunks = self.chunks.write().unwrap();
+        
+        chunks.retain(|&chunk_start, _| chunk_start >= cutoff);
+        Ok(())
     }
 }

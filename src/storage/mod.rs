@@ -6,15 +6,31 @@
 //! - Hot/warm/cold data management
 
 mod chunk;
-pub use chunk::{TimeChunk, ChunkError, ChunkMetadata, CompressionState};
+pub use chunk::{TimeChunk, ChunkError};
 
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub timestamp: i64,
     pub metric_name: String,
     pub value: f64,
+}
+
+#[derive(Debug)]
+pub struct StorageEngine {
+    chunks: HashMap<i64, TimeChunk>,
+}
+
+impl StorageEngine {
+    pub fn new() -> Self {
+        StorageEngine {
+            chunks: HashMap::new(),
+        }
+    }
+    
+    // ... rest of the implementation
 }
 
 #[cfg(test)]

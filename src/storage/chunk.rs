@@ -253,13 +253,13 @@ pub struct ChunkSummary {
 
 // Add From implementations for error conversion
 impl From<std::io::Error> for ChunkError {
-    fn from(error: std::io::Error) -> Self {
+    fn from(_error: std::io::Error) -> Self {
         ChunkError::DiskWriteFailed("IO Error occurred".to_string())
     }
 }
 
 impl From<serde_json::Error> for ChunkError {
-    fn from(error: serde_json::Error) -> Self {
+    fn from(_error: serde_json::Error) -> Self {
         ChunkError::DataCorrupted("JSON serialization error".to_string())
     }
 }

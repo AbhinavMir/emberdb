@@ -1,3 +1,7 @@
+use crate::fhir::{FHIRObservation, FHIRError};
+use crate::fhir::conversion::FHIRConverter;
+use crate::storage::Record;
+
 // Basic FHIR resource definitions
 pub struct Patient {
     pub id: String,
@@ -22,8 +26,7 @@ impl FHIRConverter for FHIRObservation {
         }
     }
 
-    fn from_records(records: &[Record]) -> Result<Self, FHIRError> {
-        // Implement conversion from records back to FHIR
-        // ...
+    fn from_records(_records: &[Record]) -> Result<Self, FHIRError> {
+        todo!("Implement from_records conversion")
     }
 } 
