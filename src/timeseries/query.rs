@@ -47,7 +47,7 @@ impl QueryEngine {
         let mut results = Vec::new();
         
         for metric in &query.metrics {
-            let records = self.storage
+            let records = self.storage.as_ref()
                 .query_range(query.start_time, query.end_time, metric)
                 .map_err(|e| QueryError::StorageError(e.to_string()))?;
 
@@ -62,7 +62,7 @@ impl QueryEngine {
     }
 
     pub fn query_latest(&self, metric: &str) -> Result<Record, QueryError> {
-        self.storage
+        self.storage.as_ref()
             .get_latest(metric)
             .map_err(|e| QueryError::StorageError(e.to_string()))
     }
@@ -89,7 +89,6 @@ impl QueryEngine {
         aggregation: &Aggregation,
         interval: Duration
     ) -> Vec<Record> {
-        // Group records by interval and aggregate each group
         let mut grouped: HashMap<i64, Vec<Record>> = HashMap::new();
         let interval_secs = interval.as_secs() as i64;
 
@@ -101,7 +100,7 @@ impl QueryEngine {
         }
 
         grouped.into_iter()
-            .map(|(timestamp, group)| self.aggregate_all(group, aggregation))
+            .map(|(_timestamp, group)| self.aggregate_all(group, aggregation))
             .collect()
     }
 

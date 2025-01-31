@@ -5,7 +5,10 @@
 
 pub mod fhir;
 pub mod storage;
-pub mod timeseries; 
+pub mod timeseries;
+pub mod config;
+pub mod api;
+pub mod error;
 
 use std::collections::HashMap;
 use std::sync::RwLock;

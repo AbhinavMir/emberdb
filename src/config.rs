@@ -3,7 +3,6 @@ use std::path::Path;
 use std::time::Duration;
 use std::fmt;
 use std::error::Error;
-use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {

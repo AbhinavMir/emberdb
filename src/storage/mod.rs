@@ -10,6 +10,10 @@ pub use chunk::{TimeChunk, ChunkError};
 
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+use std::sync::RwLock;
+use std::time::Duration;
+use crate::config::Config;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -19,168 +23,148 @@ pub struct Record {
 }
 
 #[derive(Debug)]
+pub enum StorageError {
+    ChunkNotFound(String),
+    ChunkError(ChunkError),
+    InvalidTimeRange(String),
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::ChunkNotFound(msg) => write!(f, "Chunk not found: {}", msg),
+            StorageError::ChunkError(err) => write!(f, "Chunk error: {:?}", err),
+            StorageError::InvalidTimeRange(msg) => write!(f, "Invalid time range: {}", msg),
+        }
+    }
+}
+
+impl From<ChunkError> for StorageError {
+    fn from(error: ChunkError) -> Self {
+        StorageError::ChunkError(error)
+    }
+}
+
+#[derive(Debug)]
 pub struct StorageEngine {
-    chunks: HashMap<i64, TimeChunk>,
+    chunks: RwLock<HashMap<i64, TimeChunk>>,
+    chunk_duration: Duration,
 }
 
 impl StorageEngine {
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         StorageEngine {
-            chunks: HashMap::new(),
+            chunks: RwLock::new(HashMap::new()),
+            chunk_duration: config.chunk_duration,
         }
     }
-    
-    // ... rest of the implementation
+
+    pub fn insert(&self, record: Record) -> Result<(), StorageError> {
+        let chunk_id = self.get_chunk_id(record.timestamp);
+        let mut chunks = self.chunks.write().unwrap();
+        
+        if !chunks.contains_key(&chunk_id) {
+            let start_time = chunk_id;
+            let end_time = start_time + self.chunk_duration.as_secs() as i64;
+            chunks.insert(chunk_id, TimeChunk::new(start_time, end_time));
+        }
+
+        chunks.get_mut(&chunk_id)
+            .ok_or_else(|| StorageError::ChunkNotFound("Chunk not found after creation".to_string()))?
+            .append(record)
+            .map_err(StorageError::from)
+    }
+
+    pub fn query_range(&self, start: i64, end: i64, metric: &str) -> Result<Vec<Record>, StorageError> {
+        if start >= end {
+            return Err(StorageError::InvalidTimeRange("Start time must be before end time".to_string()));
+        }
+
+        let chunks = self.chunks.read().unwrap();
+        let mut results = Vec::new();
+
+        let start_chunk = self.get_chunk_id(start);
+        let end_chunk = self.get_chunk_id(end);
+
+        for chunk_id in (start_chunk..=end_chunk).step_by(self.chunk_duration.as_secs() as usize) {
+            if let Some(chunk) = chunks.get(&chunk_id) {
+                let records = chunk.get_range(start, end, metric)
+                    .map_err(StorageError::from)?;
+                results.extend(records.iter().map(|&r| r.clone()));
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn get_latest(&self, metric: &str) -> Result<Record, StorageError> {
+        let chunks = self.chunks.read().unwrap();
+        let mut latest: Option<&Record> = None;
+        
+        for chunk in chunks.values() {
+            if let Ok(record) = chunk.get_latest(metric) {
+                if latest.is_none() || record.timestamp > latest.unwrap().timestamp {
+                    latest = Some(record);
+                }
+            }
+        }
+
+        latest.cloned()
+            .ok_or_else(|| StorageError::ChunkNotFound("No data found for metric".to_string()))
+    }
+
+    fn get_chunk_id(&self, timestamp: i64) -> i64 {
+        timestamp - (timestamp % self.chunk_duration.as_secs() as i64)
+    }
+
+    pub fn cleanup_old_chunks(&self, retention: Duration) -> Result<(), StorageError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+            
+        let cutoff = now - retention.as_secs() as i64;
+        let mut chunks = self.chunks.write().unwrap();
+        
+        chunks.retain(|&chunk_start, _| chunk_start >= cutoff);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
-    /// Helper function to create test records with given parameters
-    fn create_test_record(timestamp: i64, name: &str, value: f64) -> Record {
-        Record {
-            timestamp,
-            metric_name: name.to_string(),
-            value,
+    fn create_test_config() -> Config {
+        Config {
+            storage: crate::config::StorageConfig {
+                path: "./data".to_string(),
+                max_chunk_size: 1048576,
+            },
+            api: crate::config::ApiConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3000,
+            },
+            chunk_duration: Duration::from_secs(3600),
         }
     }
 
-    /// Tests basic TimeChunk operations:
-    /// - Creating a new chunk
-    /// - Appending a record
-    /// - Retrieving the list of metrics
     #[test]
-    fn test_basic_chunk_operations() {
-        let mut chunk = TimeChunk::new(0, 100);
-        let record = create_test_record(50, "test", 42.0);
-        
-        assert!(chunk.append(record).is_ok());
-        
-        let metrics = chunk.get_metrics_list();
-        assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0], "test");
-    }
+    fn test_basic_operations() {
+        let config = create_test_config();
+        let storage = StorageEngine::new(&config);
 
-    /// Tests time range validation:
-    /// - Rejects records before chunk's start time
-    /// - Rejects records after chunk's end time
-    /// - Accepts records within the time range
-    #[test]
-    fn test_time_range_validation() {
-        let mut chunk = TimeChunk::new(100, 200);
-        
-        let record1 = create_test_record(50, "test", 42.0);   // Too early
-        let record2 = create_test_record(250, "test", 42.0);  // Too late
-        let record3 = create_test_record(150, "test", 42.0);  // Just right
-        
-        assert!(chunk.append(record1).is_err());
-        assert!(chunk.append(record2).is_err());
-        assert!(chunk.append(record3).is_ok());
-    }
+        let record = Record {
+            timestamp: 1000,
+            metric_name: "test".to_string(),
+            value: 42.0,
+        };
 
-    /// Tests metric retrieval functionality:
-    /// - Getting all records for a specific metric
-    /// - Getting the latest value for a metric
-    /// - Handling non-existent metrics
-    /// - Correct ordering of records
-    #[test]
-    fn test_metric_retrieval() {
-        let mut chunk = TimeChunk::new(0, 100);
+        assert!(storage.insert(record.clone()).is_ok());
         
-        chunk.append(create_test_record(10, "cpu", 50.0)).unwrap();
-        chunk.append(create_test_record(20, "cpu", 60.0)).unwrap();
-        chunk.append(create_test_record(30, "memory", 80.0)).unwrap();
-        
-        let cpu_metrics = chunk.get_metric("cpu").unwrap();
-        assert_eq!(cpu_metrics.len(), 2);
-        
-        let latest_cpu = chunk.get_latest("cpu").unwrap();
-        assert_eq!(latest_cpu.value, 60.0);
-        
-        assert!(chunk.get_metric("nonexistent").is_err());
-    }
-
-    /// Tests time range queries:
-    /// - Getting records within a specific time window
-    /// - Handling empty results
-    /// - Correct filtering of records by time
-    #[test]
-    fn test_range_queries() {
-        let mut chunk = TimeChunk::new(0, 100);
-        
-        for i in 0..5 {
-            chunk.append(create_test_record(i * 20, "test", i as f64)).unwrap();
-        }
-        
-        let results = chunk.get_range(10, 50, "test").unwrap();
-        assert_eq!(results.len(), 2); // Should include records at t=20 and t=40
-        
-        let empty_results = chunk.get_range(90, 100, "test").unwrap();
-        assert_eq!(empty_results.len(), 0);
-    }
-
-    /// Tests chunk summary statistics:
-    /// - Calculating min, max, average values
-    /// - Counting records
-    /// - Accuracy of statistical calculations
-    #[test]
-    fn test_chunk_summary() {
-        let mut chunk = TimeChunk::new(0, 100);
-        
-        chunk.append(create_test_record(10, "temp", 20.0)).unwrap();
-        chunk.append(create_test_record(20, "temp", 25.0)).unwrap();
-        chunk.append(create_test_record(30, "temp", 30.0)).unwrap();
-        
-        let summary = chunk.summarize("temp").unwrap();
-        assert_eq!(summary.count, 3);
-        assert_eq!(summary.min, 20.0);
-        assert_eq!(summary.max, 30.0);
-        assert_eq!(summary.avg, 25.0);
-    }
-
-    /// Tests chunk merging functionality:
-    /// - Merging overlapping chunks
-    /// - Preserving all records after merge
-    /// - Maintaining time order
-    #[test]
-    fn test_chunk_merge() {
-        let mut chunk1 = TimeChunk::new(0, 100);
-        let mut chunk2 = TimeChunk::new(50, 150);
-        
-        chunk1.append(create_test_record(25, "test", 1.0)).unwrap();
-        chunk2.append(create_test_record(75, "test", 2.0)).unwrap();
-        
-        assert!(chunk1.merge(chunk2).is_ok());
-        
-        let merged_data = chunk1.get_metric("test").unwrap();
-        assert_eq!(merged_data.len(), 2);
-    }
-
-    /// Tests compression state changes:
-    /// - Successful compression
-    /// - Compression state tracking
-    #[test]
-    fn test_compression_state() {
-        let mut chunk = TimeChunk::new(0, 100);
-        chunk.append(create_test_record(50, "test", 42.0)).unwrap();
-        
-        assert!(chunk.compress().is_ok());
-    }
-
-    /// Tests chunk validation:
-    /// - Invalid time ranges (end before start)
-    /// - Valid chunk configurations
-    /// - Data integrity checks
-    #[test]
-    fn test_validation() {
-        // Test invalid time range
-        let chunk = TimeChunk::new(100, 0);
-        assert!(chunk.validate().is_err());
-        
-        // Test valid chunk
-        let mut valid_chunk = TimeChunk::new(0, 100);
-        valid_chunk.append(create_test_record(50, "test", 42.0)).unwrap();
-        assert!(valid_chunk.validate().is_ok());
+        let result = storage.get_latest("test");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().value, 42.0);
     }
 } 

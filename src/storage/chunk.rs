@@ -33,8 +33,6 @@ pub enum ChunkError {
     IndexError(String),
 }
 
-type Result<T> = std::result::Result<T, ChunkError>;
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimeChunk {
     start_time: i64,
@@ -66,7 +64,7 @@ impl TimeChunk {
         }
     }
 
-    pub fn append(&mut self, record: Record) -> Result<()> {
+    pub fn append(&mut self, record: Record) -> std::result::Result<(), ChunkError> {
         if !self.can_accept(record.timestamp) {
             return Err(ChunkError::OutOfTimeRange("Record timestamp outside chunk range".to_string()));
         }
@@ -96,41 +94,44 @@ impl TimeChunk {
         })
     }
 
-    pub fn get_range(&mut self, start: i64, end: i64, metric: &str) -> Result<Vec<&Record>> {
-        self.update_access_time();
-        
-        Ok(self
-            .records
+    pub fn get_range(&self, start: i64, end: i64, metric: &str) -> std::result::Result<Vec<&Record>, ChunkError> {
+        if start > self.end_time || end < self.start_time {
+            return Ok(Vec::new());
+        }
+
+        self.records
             .get(metric)
-            .ok_or(ChunkError::IndexError("Metric not found".to_string()))?
-            .iter()
-            .filter(|r| r.timestamp >= start && r.timestamp < end)
-            .collect())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|r| r.timestamp >= start && r.timestamp < end)
+                    .collect()
+            })
+            .ok_or_else(|| ChunkError::IndexError("Metric not found".to_string()))
     }
 
-    pub fn get_metric(&mut self, metric: &str) -> Result<&Vec<Record>> {
+    pub fn get_metric(&mut self, metric: &str) -> std::result::Result<&Vec<Record>, ChunkError> {
         self.update_access_time();
         self.records
             .get(metric)
             .ok_or(ChunkError::IndexError("Metric not found".to_string()))
     }
 
-    pub fn get_latest(&mut self, metric: &str) -> Result<&Record> {
-        self.update_access_time();
+    pub fn get_latest(&self, metric: &str) -> std::result::Result<&Record, ChunkError> {
         self.records
             .get(metric)
             .and_then(|records| records.last())
-            .ok_or(ChunkError::IndexError("No records found".to_string()))
+            .ok_or_else(|| ChunkError::IndexError("No records found".to_string()))
     }
 
-    pub fn get_metrics_list(&mut self) -> Vec<String> {
-        self.update_access_time();
+    pub fn get_metrics_list(&self) -> Vec<String> {
         self.records.keys().cloned().collect()
     }
 
-    pub fn summarize(&mut self, metric: &str) -> Result<ChunkSummary> {
-        self.update_access_time();
-        let records = self.get_metric(metric)?;
+    pub fn summarize(&self, metric: &str) -> std::result::Result<ChunkSummary, ChunkError> {
+        let records = self.records
+            .get(metric)
+            .ok_or_else(|| ChunkError::IndexError("Metric not found".to_string()))?;
         
         if records.is_empty() {
             return Err(ChunkError::IndexError("No records found".to_string()));
@@ -148,7 +149,7 @@ impl TimeChunk {
         })
     }
 
-    pub fn compress(&mut self) -> Result<()> {
+    pub fn compress(&mut self) -> std::result::Result<(), ChunkError> {
         self.compression_state = CompressionState::InProgress;
         
         for records in self.records.values_mut() {
@@ -169,7 +170,7 @@ impl TimeChunk {
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> std::result::Result<(), ChunkError> {
         // Basic validation checks
         if self.start_time >= self.end_time {
             return Err(ChunkError::ValidationFailed("Invalid time range".to_string()));
@@ -193,7 +194,7 @@ impl TimeChunk {
             .as_secs() as i64;
     }
 
-    pub fn flush_to_disk(&self) -> Result<()> {
+    pub fn flush_to_disk(&self) -> std::result::Result<(), ChunkError> {
         let path = self.get_chunk_path();
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
@@ -202,7 +203,7 @@ impl TimeChunk {
             .map_err(|e| ChunkError::DiskWriteFailed(e.to_string()))
     }
 
-    pub fn load_from_disk(path: &str) -> Result<Self> {
+    pub fn load_from_disk(path: &str) -> std::result::Result<Self, ChunkError> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         
@@ -210,13 +211,13 @@ impl TimeChunk {
             .map_err(|e| ChunkError::DataCorrupted(e.to_string()))
     }
 
-    pub fn cleanup(&mut self) -> Result<()> {
+    pub fn cleanup(&mut self) -> std::result::Result<(), ChunkError> {
         // Implement cleanup logic (e.g., removing old data)
         self.update_access_time();
         Ok(())
     }
 
-    pub fn merge(&mut self, other: TimeChunk) -> Result<()> {
+    pub fn merge(&mut self, other: TimeChunk) -> std::result::Result<(), ChunkError> {
         if other.end_time < self.start_time || other.start_time > self.end_time {
             return Err(ChunkError::OutOfTimeRange("Chunks don't overlap".to_string()));
         }
