@@ -6,10 +6,24 @@ pub struct TimeSeriesQuery {
 }
 
 pub enum Aggregation {
-    Mean(Duration),
-    Max(Duration),
-    Min(Duration),
-    Count(Duration),
+    Mean,
+    Max,
+    Min,
+    Count,
+}
+
+pub struct QueryEngine {
+    storage: Arc<StorageEngine>,
+}
+
+impl QueryEngine {
+    pub fn query_range(&self, query: TimeSeriesQuery) -> Result<Vec<Record>, QueryError> {
+        // Implement basic time range queries
+    }
+
+    pub fn query_latest(&self, metric: &str) -> Result<Record, QueryError> {
+        // Get most recent value
+    }
 }
 
 impl TimeSeriesQuery {
