@@ -6,12 +6,11 @@
 //! - Hot/warm/cold data management
 
 mod chunk;
+pub use chunk::{TimeChunk, ChunkError, ChunkMetadata, CompressionState};
 
-// Re-export TimeChunk so it can be used by other modules
-pub use chunk::TimeChunk;
+use serde::{Serialize, Deserialize};
 
-// Re-export Record since it's used by TimeChunk
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub timestamp: i64,
     pub metric_name: String,

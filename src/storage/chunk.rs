@@ -25,12 +25,12 @@ pub struct ChunkMetadata {
 
 #[derive(Debug)]
 pub enum ChunkError {
-    OutOfTimeRange(&'static str),
-    CompressionFailed(&'static str),
-    DiskWriteFailed(&'static str),
-    ValidationFailed(&'static str),
-    DataCorrupted(&'static str),
-    IndexError(&'static str),
+    OutOfTimeRange(String),
+    CompressionFailed(String),
+    DiskWriteFailed(String),
+    ValidationFailed(String),
+    DataCorrupted(String),
+    IndexError(String),
 }
 
 type Result<T> = std::result::Result<T, ChunkError>;
@@ -68,7 +68,7 @@ impl TimeChunk {
 
     pub fn append(&mut self, record: Record) -> Result<()> {
         if !self.can_accept(record.timestamp) {
-            return Err(ChunkError::OutOfTimeRange("Record timestamp outside chunk range"));
+            return Err(ChunkError::OutOfTimeRange("Record timestamp outside chunk range".to_string()));
         }
 
         self.records
@@ -102,7 +102,7 @@ impl TimeChunk {
         Ok(self
             .records
             .get(metric)
-            .ok_or(ChunkError::IndexError("Metric not found"))?
+            .ok_or(ChunkError::IndexError("Metric not found".to_string()))?
             .iter()
             .filter(|r| r.timestamp >= start && r.timestamp < end)
             .collect())
@@ -112,7 +112,7 @@ impl TimeChunk {
         self.update_access_time();
         self.records
             .get(metric)
-            .ok_or(ChunkError::IndexError("Metric not found"))
+            .ok_or(ChunkError::IndexError("Metric not found".to_string()))
     }
 
     pub fn get_latest(&mut self, metric: &str) -> Result<&Record> {
@@ -120,7 +120,7 @@ impl TimeChunk {
         self.records
             .get(metric)
             .and_then(|records| records.last())
-            .ok_or(ChunkError::IndexError("No records found"))
+            .ok_or(ChunkError::IndexError("No records found".to_string()))
     }
 
     pub fn get_metrics_list(&mut self) -> Vec<String> {
@@ -133,7 +133,7 @@ impl TimeChunk {
         let records = self.get_metric(metric)?;
         
         if records.is_empty() {
-            return Err(ChunkError::IndexError("No records found"));
+            return Err(ChunkError::IndexError("No records found".to_string()));
         }
 
         let sum: f64 = records.iter().map(|r| r.value).sum();
@@ -172,13 +172,13 @@ impl TimeChunk {
     pub fn validate(&self) -> Result<()> {
         // Basic validation checks
         if self.start_time >= self.end_time {
-            return Err(ChunkError::ValidationFailed("Invalid time range"));
+            return Err(ChunkError::ValidationFailed("Invalid time range".to_string()));
         }
 
         for (_, records) in &self.records {
             for record in records {
                 if !self.can_accept(record.timestamp) {
-                    return Err(ChunkError::ValidationFailed("Record outside chunk range"));
+                    return Err(ChunkError::ValidationFailed("Record outside chunk range".to_string()));
                 }
             }
         }
@@ -198,7 +198,6 @@ impl TimeChunk {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
         
-        // Serialize chunk data
         serde_json::to_writer(writer, &self)
             .map_err(|e| ChunkError::DiskWriteFailed(e.to_string()))
     }
@@ -207,7 +206,6 @@ impl TimeChunk {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         
-        // Deserialize chunk data
         serde_json::from_reader(reader)
             .map_err(|e| ChunkError::DataCorrupted(e.to_string()))
     }
@@ -220,7 +218,7 @@ impl TimeChunk {
 
     pub fn merge(&mut self, other: TimeChunk) -> Result<()> {
         if other.end_time < self.start_time || other.start_time > self.end_time {
-            return Err(ChunkError::OutOfTimeRange("Chunks don't overlap"));
+            return Err(ChunkError::OutOfTimeRange("Chunks don't overlap".to_string()));
         }
 
         for (metric, records) in other.records {
@@ -256,12 +254,12 @@ pub struct ChunkSummary {
 // Add From implementations for error conversion
 impl From<std::io::Error> for ChunkError {
     fn from(error: std::io::Error) -> Self {
-        ChunkError::DiskWriteFailed("IO Error occurred")
+        ChunkError::DiskWriteFailed("IO Error occurred".to_string())
     }
 }
 
 impl From<serde_json::Error> for ChunkError {
     fn from(error: serde_json::Error) -> Self {
-        ChunkError::DataCorrupted("JSON serialization error")
+        ChunkError::DataCorrupted("JSON serialization error".to_string())
     }
 }
