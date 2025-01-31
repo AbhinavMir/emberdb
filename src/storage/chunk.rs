@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use super::Record;
+use std::fs::File;
+use std::io::{BufWriter, BufReader};
+use serde_json;
 
 #[derive(Debug)]
 pub enum CompressionState {
@@ -145,14 +148,23 @@ impl TimeChunk {
     }
 
     pub fn compress(&mut self) -> Result<()> {
-        if matches!(self.compression_state, CompressionState::Compressed) {
-            return Ok(());
-        }
-
         self.compression_state = CompressionState::InProgress;
-        // Implement actual compression logic here
+        
+        for records in self.records.values_mut() {
+            // Delta encoding for timestamps
+            let mut last_timestamp = 0;
+            for record in records.iter_mut() {
+                let delta = record.timestamp - last_timestamp;
+                last_timestamp = record.timestamp;
+                record.timestamp = delta;
+            }
+            
+            // Value compression using gorilla algorithm
+            // Implement value compression here
+        }
+        
         self.compression_state = CompressionState::Compressed;
-        self.update_access_time();
+        self.metadata.compression_ratio = self.calculate_compression_ratio();
         Ok(())
     }
 
@@ -180,15 +192,23 @@ impl TimeChunk {
             .as_secs() as i64;
     }
 
-    // Placeholder for disk operations - would need actual implementation
     pub fn flush_to_disk(&self) -> Result<()> {
-        // Implement actual disk writing logic
-        Ok(())
+        let path = self.get_chunk_path();
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        
+        // Serialize chunk data
+        serde_json::to_writer(writer, &self)
+            .map_err(|e| ChunkError::DiskWriteFailed(e.to_string()))
     }
 
-    pub fn load_from_disk(_path: &str) -> Result<Self> {
-        // Implement actual disk reading logic
-        Err(ChunkError::DiskWriteFailed("Not implemented"))
+    pub fn load_from_disk(path: &str) -> Result<Self> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        
+        // Deserialize chunk data
+        serde_json::from_reader(reader)
+            .map_err(|e| ChunkError::DataCorrupted(e.to_string()))
     }
 
     pub fn cleanup(&mut self) -> Result<()> {
