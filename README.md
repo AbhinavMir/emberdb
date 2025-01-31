@@ -48,16 +48,51 @@ cargo test
 
 ## Current Status
 
-EmberDB is currently in early development. Implemented features:
+EmberDB is currently in early development. 
+
+### Implemented Features ✅
 - Basic time-series storage
 - Time chunk management
 - Memory-efficient data structures
+- Hot-cold data separation
 
-Under development:
+### In Progress 🚧
 - FHIR compliance layer
+  - Basic FHIR Observation mapping
+  - Resource validation
+  - FHIR search capabilities
 - Compression strategies
+  - Implementing delta encoding
+  - Evaluating different compression algorithms for medical data
 - Pattern detection optimizations
+  - Multi-vital correlation detection
+  - Anomaly detection algorithms
 - Disk persistence
+  - Write-ahead logging
+  - Data recovery mechanisms
+
+### Upcoming Features 📋
+- Authentication and authorization
+- Multi-tenant support
+- Distributed storage capabilities
+- Real-time alerting system
+- HIPAA compliance features
+  - Audit logging
+  - Data encryption at rest
+  - Access control lists
+- Query optimization engine
+- Backup and restore functionality
+- Data retention policies
+- Integration APIs
+  - REST API
+  - gRPC interface
+  - HL7v2 compatibility layer
+
+### Performance Goals 🎯
+- Sub-millisecond query response for recent data
+- Support for 100,000+ data points per second per node
+- 10:1 minimum compression ratio for historical data
+- 99.99% uptime
 
 ## Technical Details
 
