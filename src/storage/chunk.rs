@@ -4,15 +4,16 @@ use super::Record;
 use std::fs::File;
 use std::io::{BufWriter, BufReader};
 use serde_json;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum CompressionState {
     Uncompressed,
     Compressed,
     InProgress,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct ChunkMetadata {
     created_at: i64,
@@ -34,7 +35,7 @@ pub enum ChunkError {
 
 type Result<T> = std::result::Result<T, ChunkError>;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TimeChunk {
     start_time: i64,
     end_time: i64,
@@ -233,6 +234,15 @@ impl TimeChunk {
         self.update_access_time();
         Ok(())
     }
+
+    fn calculate_compression_ratio(&self) -> f64 {
+        // Simple implementation for now
+        1.0
+    }
+
+    fn get_chunk_path(&self) -> String {
+        format!("data/chunk_{}-{}.json", self.start_time, self.end_time)
+    }
 }
 
 #[derive(Debug)]
@@ -241,4 +251,17 @@ pub struct ChunkSummary {
     pub min: f64,
     pub max: f64,
     pub avg: f64,
+}
+
+// Add From implementations for error conversion
+impl From<std::io::Error> for ChunkError {
+    fn from(error: std::io::Error) -> Self {
+        ChunkError::DiskWriteFailed("IO Error occurred")
+    }
+}
+
+impl From<serde_json::Error> for ChunkError {
+    fn from(error: serde_json::Error) -> Self {
+        ChunkError::DataCorrupted("JSON serialization error")
+    }
 }

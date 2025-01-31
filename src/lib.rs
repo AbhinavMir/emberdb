@@ -9,12 +9,26 @@ pub mod timeseries;
 
 use std::collections::HashMap;
 use crate::storage::TimeChunk;
+use crate::storage::ChunkError;
 
 #[derive(Debug, Clone)]
 pub enum Value {
     Float(f64),
     Integer(i64),
     String(String),
+}
+
+#[derive(Debug)]
+pub enum StorageError {
+    ChunkNotFound,
+    ChunkError(ChunkError),
+    InvalidTimeRange,
+}
+
+impl From<ChunkError> for StorageError {
+    fn from(error: ChunkError) -> Self {
+        StorageError::ChunkError(error)
+    }
 }
 
 #[derive(Debug)]

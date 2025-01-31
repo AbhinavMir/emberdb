@@ -6,6 +6,13 @@
 pub mod resources;
 pub mod conversion;
 
+#[derive(Debug)]
+pub enum FHIRError {
+    ConversionError(&'static str),
+    ValidationError(&'static str),
+    NotFound(&'static str),
+}
+
 /// Core FHIR data types that map to time-series data
 #[derive(Debug, Clone)]
 pub enum FHIRObservation {
