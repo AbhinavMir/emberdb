@@ -97,13 +97,21 @@ impl StorageEngine {
     
     /// Recover chunks from disk and replay the WAL to recover recent records
     fn recover(&mut self) -> Result<(), StorageError> {
+        println!("Starting recovery process...");
+        
         // First, load any existing chunks from disk
         let chunk_ids = self.persistence.list_chunks()?;
+        println!("Found {} chunks on disk", chunk_ids.len());
+        
         let mut chunks = self.chunks.write().unwrap();
         
         for chunk_id in chunk_ids {
+            println!("Loading chunk {} from disk", chunk_id);
             match self.persistence.load_chunk(chunk_id) {
                 Ok(chunk) => {
+                    println!("Successfully loaded chunk {} with {} records", 
+                             chunk_id, 
+                             chunk.records.values().map(|v| v.len()).sum::<usize>());
                     chunks.insert(chunk_id, chunk);
                 },
                 Err(e) => {
@@ -114,15 +122,21 @@ impl StorageEngine {
         }
         
         // Then, replay the WAL to recover any records not yet in chunks
+        println!("Replaying write-ahead log...");
         let wal_records = self.persistence.replay_wal()?;
+        println!("Found {} records in WAL", wal_records.len());
+        
         drop(chunks); // Release the lock before inserting records
         
-        for record in wal_records {
+        for (i, record) in wal_records.into_iter().enumerate() {
+            println!("Replaying WAL record {}: metric={}, value={}", 
+                     i, record.metric_name, record.value);
             if let Err(e) = self.insert_internal(record, false) {
                 eprintln!("Error during WAL replay: {:?}", e);
             }
         }
         
+        println!("Recovery process completed");
         Ok(())
     }
 
@@ -242,20 +256,39 @@ impl StorageEngine {
     /// Persist all dirty chunks to disk
     pub fn flush_all(&self) -> Result<(), StorageError> {
         if !self.persistence_enabled {
+            println!("Persistence disabled, skipping flush");
             return Ok(());
         }
         
+        println!("Starting to flush all dirty chunks to disk...");
         let chunks = self.chunks.read().unwrap();
+        println!("Total chunks in memory: {}", chunks.len());
         
-        for chunk in chunks.values() {
+        let mut flushed_count = 0;
+        for (chunk_id, chunk) in chunks.iter() {
             if chunk.is_dirty() {
-                self.persist_chunk(chunk)?;
+                println!("Flushing dirty chunk with ID: {}", chunk_id);
+                if let Err(e) = self.persist_chunk(chunk) {
+                    println!("Error flushing chunk {}: {:?}", chunk_id, e);
+                    return Err(e);
+                }
+                flushed_count += 1;
             }
         }
         
-        // Truncate the WAL after all chunks are persisted
-        self.persistence.truncate_wal()?;
+        println!("Flushed {} dirty chunks", flushed_count);
         
+        // Truncate the WAL after all chunks are persisted
+        println!("Truncating WAL...");
+        match self.persistence.truncate_wal() {
+            Ok(_) => println!("WAL truncated successfully"),
+            Err(e) => {
+                println!("Error truncating WAL: {:?}", e);
+                return Err(e);
+            }
+        }
+        
+        println!("Flush completed successfully");
         Ok(())
     }
 
@@ -280,6 +313,24 @@ impl StorageEngine {
     /// Enable or disable persistence
     pub fn set_persistence(&mut self, enabled: bool) {
         self.persistence_enabled = enabled;
+    }
+
+    pub fn get_matching_metrics(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        println!("StorageEngine: finding metrics with prefix: {}", prefix);
+        let chunks = self.chunks.read().unwrap();
+        let mut matching_metrics = Vec::new();
+        
+        for chunk in chunks.values() {
+            // Collect all metric names that start with the prefix
+            for metric_name in chunk.records.keys() {
+                if metric_name.starts_with(prefix) && !matching_metrics.contains(metric_name) {
+                    println!("Found matching metric: {}", metric_name);
+                    matching_metrics.push(metric_name.clone());
+                }
+            }
+        }
+        
+        Ok(matching_metrics)
     }
 }
 

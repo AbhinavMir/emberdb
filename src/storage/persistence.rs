@@ -131,8 +131,56 @@ impl PersistenceManager {
     
     /// Truncate WAL after chunks are safely persisted
     pub fn truncate_wal(&self) -> Result<(), StorageError> {
-        self.wal.truncate()
-            .map_err(|e| StorageError::PersistenceError(e.to_string()))
+        println!("Truncating WAL...");
+        
+        // Don't lock the entire file, just create a new one and atomically replace it
+        let log_path = self.wal.wal_path.join("records.wal");
+        let temp_path = self.wal.wal_path.join("records.wal.new");
+        
+        println!("Creating new empty WAL file at {:?}", temp_path);
+        
+        // Create a new empty file
+        {
+            let file = File::create(&temp_path)
+                .map_err(|e| StorageError::PersistenceError(format!("Failed to create new WAL file: {}", e)))?;
+            
+            // Explicitly close the file here
+            drop(file);
+        }
+        
+        // Atomically replace the old file with the new one
+        println!("Replacing old WAL with new empty file");
+        fs::rename(&temp_path, &log_path)
+            .map_err(|e| StorageError::PersistenceError(format!("Failed to replace WAL file: {}", e)))?;
+        
+        // Now reopen the file in the mutex
+        println!("Reopening WAL file handle");
+        let new_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| StorageError::PersistenceError(format!("Failed to open new WAL file: {}", e)))?;
+        
+        // Replace the file in our mutex
+        {
+            println!("Acquiring WAL file lock to update handle");
+            match self.wal.log_file.lock() {
+                Ok(mut log_file) => {
+                    println!("Lock acquired, replacing WAL file handle");
+                    *log_file = new_file;
+                    println!("WAL file handle replaced successfully");
+                },
+                Err(e) => {
+                    println!("Error acquiring WAL lock: {:?}", e);
+                    return Err(StorageError::PersistenceError(format!("Mutex error: {:?}", e)));
+                }
+            }
+        }
+        
+        println!("WAL truncation completed successfully");
+        Ok(())
     }
     
     /// Mark chunk WAL records as durable, removing them from active records
@@ -225,24 +273,5 @@ impl WriteAheadLog {
         }
         
         Ok(records)
-    }
-    
-    /// Truncate the WAL after data has been safely persisted
-    pub fn truncate(&self) -> io::Result<()> {
-        let log_path = self.wal_path.join("records.wal");
-        
-        // Create a new empty file
-        let new_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&log_path)?;
-        
-        // Replace the file in our mutex
-        let mut log_file = self.log_file.lock().unwrap();
-        *log_file = new_file;
-        
-        Ok(())
     }
 } 

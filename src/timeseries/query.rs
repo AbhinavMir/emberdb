@@ -85,6 +85,22 @@ impl QueryEngine {
             .map_err(|e| QueryError::StorageError(e.to_string()))
     }
 
+    pub fn get_metrics_by_prefix(&self, prefix: &str) -> Result<Record, QueryError> {
+        println!("Searching for metrics with prefix: {}", prefix);
+        
+        let metrics = self.storage.as_ref().get_matching_metrics(prefix)
+            .map_err(|e| QueryError::StorageError(e.to_string()))?;
+        
+        println!("Found matching metrics: {:?}", metrics);
+        
+        if metrics.is_empty() {
+            return Err(QueryError::StorageError("No matching metrics found".to_string()));
+        }
+        
+        let metric = &metrics[0];
+        self.query_latest(metric)
+    }
+
     fn aggregate_records(
         &self,
         records: Vec<Record>,

@@ -80,11 +80,13 @@ impl RestApi {
                     let code = params.get("code");
                     
                     if let (Some(patient_id), Some(code_value)) = (patient, code) {
-                        // Format metric name as we do when storing
+                        // Format metric name with a wildcard for the unit part
                         let metric_pattern = format!("{}|{}|", patient_id, code_value);
                         
+                        println!("Querying metric pattern: {}", metric_pattern);
+                        
                         // Query for records with this metric prefix
-                        match query_engine.query_latest(&metric_pattern) {
+                        match query_engine.get_metrics_by_prefix(&metric_pattern) {
                             Ok(record) => {
                                 let response = ApiResponse {
                                     status: "success".to_string(),
@@ -152,6 +154,9 @@ impl RestApi {
                     
                     // Convert to records and store
                     let records = fhir_observation.to_records();
+                    println!("Storing observation with metric names: {:?}", 
+                             records.iter().map(|r| &r.metric_name).collect::<Vec<_>>());
+
                     for record in records {
                         if let Err(err) = query_engine.store_record(record) {
                             let response = ApiResponse {
