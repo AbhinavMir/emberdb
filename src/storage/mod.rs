@@ -144,7 +144,7 @@ mod tests {
             },
             api: crate::config::ApiConfig {
                 host: "127.0.0.1".to_string(),
-                port: 3000,
+                port: 5442,
             },
             chunk_duration: Duration::from_secs(3600),
         }

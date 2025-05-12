@@ -4,6 +4,6 @@ storage:
 
 api:
   host: "127.0.0.1"
-  port: 3000
+  port: 5432
 
 chunk_duration: "1h"  # 1 hour chunks 

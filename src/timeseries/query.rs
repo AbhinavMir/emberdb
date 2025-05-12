@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crate::storage::{StorageEngine, Record};
+use crate::storage::{StorageEngine, Record, StorageError};
 use std::time::Duration;
 use std::collections::HashMap;
 
@@ -28,6 +28,12 @@ pub enum QueryError {
     MetricNotFound(String),
 }
 
+impl From<StorageError> for QueryError {
+    fn from(error: StorageError) -> Self {
+        QueryError::StorageError(format!("{:?}", error))
+    }
+}
+
 pub struct QueryEngine {
     storage: Arc<StorageEngine>,
 }
@@ -35,6 +41,18 @@ pub struct QueryEngine {
 impl QueryEngine {
     pub fn new(storage: Arc<StorageEngine>) -> Self {
         QueryEngine { storage }
+    }
+
+    pub fn store_record(&self, record: Record) -> Result<(), QueryError> {
+        self.storage.insert(record)
+            .map_err(|e| QueryError::StorageError(e.to_string()))
+    }
+    
+    pub fn store_records(&self, records: Vec<Record>) -> Result<(), QueryError> {
+        for record in records {
+            self.store_record(record)?;
+        }
+        Ok(())
     }
 
     pub fn query_range(&self, query: TimeSeriesQuery) -> Result<Vec<Record>, QueryError> {
