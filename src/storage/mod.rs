@@ -7,11 +7,14 @@
 
 mod chunk;
 pub use chunk::{TimeChunk, ChunkError};
+mod persistence;
+use persistence::PersistenceManager;
 
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{RwLock, Arc};
 use std::time::Duration;
+use std::path::PathBuf;
 use crate::config::Config;
 use std::fmt;
 
@@ -27,6 +30,7 @@ pub enum StorageError {
     ChunkNotFound(String),
     ChunkError(ChunkError),
     InvalidTimeRange(String),
+    PersistenceError(String),
 }
 
 impl fmt::Display for StorageError {
@@ -35,6 +39,7 @@ impl fmt::Display for StorageError {
             StorageError::ChunkNotFound(msg) => write!(f, "Chunk not found: {}", msg),
             StorageError::ChunkError(err) => write!(f, "Chunk error: {:?}", err),
             StorageError::InvalidTimeRange(msg) => write!(f, "Invalid time range: {}", msg),
+            StorageError::PersistenceError(msg) => write!(f, "Persistence error: {}", msg),
         }
     }
 }
@@ -45,34 +50,151 @@ impl From<ChunkError> for StorageError {
     }
 }
 
+impl From<std::io::Error> for StorageError {
+    fn from(error: std::io::Error) -> Self {
+        StorageError::PersistenceError(format!("IO error: {}", error))
+    }
+}
+
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StorageError::ChunkError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct StorageEngine {
     chunks: RwLock<HashMap<i64, TimeChunk>>,
     chunk_duration: Duration,
+    persistence: Arc<PersistenceManager>,
+    persistence_enabled: bool,
 }
 
 impl StorageEngine {
-    pub fn new(config: &Config) -> Self {
-        StorageEngine {
+    pub fn new(config: &Config) -> Result<Self, StorageError> {
+        // Create the storage directories
+        let data_path = PathBuf::from(&config.storage.path);
+        let persistence = match PersistenceManager::new(&data_path) {
+            Ok(p) => Arc::new(p),
+            Err(e) => return Err(StorageError::PersistenceError(format!("Failed to initialize persistence: {}", e))),
+        };
+        
+        let mut engine = StorageEngine {
             chunks: RwLock::new(HashMap::new()),
             chunk_duration: config.chunk_duration,
+            persistence,
+            persistence_enabled: true,
+        };
+        
+        // Recover from disk and WAL
+        engine.recover()?;
+        
+        Ok(engine)
+    }
+    
+    /// Recover chunks from disk and replay the WAL to recover recent records
+    fn recover(&mut self) -> Result<(), StorageError> {
+        // First, load any existing chunks from disk
+        let chunk_ids = self.persistence.list_chunks()?;
+        let mut chunks = self.chunks.write().unwrap();
+        
+        for chunk_id in chunk_ids {
+            match self.persistence.load_chunk(chunk_id) {
+                Ok(chunk) => {
+                    chunks.insert(chunk_id, chunk);
+                },
+                Err(e) => {
+                    // Log the error, but continue loading other chunks
+                    eprintln!("Error loading chunk {}: {:?}", chunk_id, e);
+                }
+            }
         }
+        
+        // Then, replay the WAL to recover any records not yet in chunks
+        let wal_records = self.persistence.replay_wal()?;
+        drop(chunks); // Release the lock before inserting records
+        
+        for record in wal_records {
+            if let Err(e) = self.insert_internal(record, false) {
+                eprintln!("Error during WAL replay: {:?}", e);
+            }
+        }
+        
+        Ok(())
     }
 
+    /// Insert a record into the appropriate time chunk
     pub fn insert(&self, record: Record) -> Result<(), StorageError> {
+        self.insert_internal(record, self.persistence_enabled)
+    }
+    
+    /// Internal insert method that can optionally write to WAL
+    fn insert_internal(&self, record: Record, write_wal: bool) -> Result<(), StorageError> {
+        // First, write to WAL if persistence is enabled
+        if write_wal {
+            self.persistence.append_record(&record)?;
+        }
+        
         let chunk_id = self.get_chunk_id(record.timestamp);
         let mut chunks = self.chunks.write().unwrap();
         
+        // Create new chunk if needed
         if !chunks.contains_key(&chunk_id) {
             let start_time = chunk_id;
             let end_time = start_time + self.chunk_duration.as_secs() as i64;
             chunks.insert(chunk_id, TimeChunk::new(start_time, end_time));
         }
 
-        chunks.get_mut(&chunk_id)
-            .ok_or_else(|| StorageError::ChunkNotFound("Chunk not found after creation".to_string()))?
-            .append(record)
-            .map_err(StorageError::from)
+        // Insert into appropriate chunk
+        let chunk = chunks.get_mut(&chunk_id)
+            .ok_or_else(|| StorageError::ChunkNotFound("Chunk not found after creation".to_string()))?;
+        
+        chunk.append(record).map_err(StorageError::from)?;
+        
+        // Check if the chunk is full and should be persisted
+        let should_persist = chunk.is_full();
+        
+        // If we need to persist, clone the chunk before releasing the lock
+        let chunk_to_persist = if should_persist && self.persistence_enabled {
+            Some((chunk_id, chunk.clone()))
+        } else {
+            None
+        };
+        
+        // Release the lock
+        drop(chunks);
+        
+        // Persist the chunk if needed
+        if let Some((_, chunk)) = chunk_to_persist {
+            self.persist_chunk(&chunk)?;
+        }
+        
+        Ok(())
+    }
+
+    /// Persist a chunk to disk
+    fn persist_chunk(&self, chunk: &TimeChunk) -> Result<(), StorageError> {
+        if !self.persistence_enabled {
+            return Ok(());
+        }
+        
+        // Save the chunk
+        self.persistence.save_chunk(chunk)?;
+        
+        // Mark the chunk as durable in the WAL
+        let chunk_duration_secs = self.chunk_duration.as_secs() as i64;
+        self.persistence.mark_chunk_durable(chunk.start_time, chunk_duration_secs)?;
+        
+        // Mark chunk as clean
+        let mut chunks = self.chunks.write().unwrap();
+        if let Some(chunk) = chunks.get_mut(&chunk.start_time) {
+            chunk.mark_clean();
+        }
+        
+        Ok(())
     }
 
     pub fn query_range(&self, start: i64, end: i64, metric: &str) -> Result<Vec<Record>, StorageError> {
@@ -110,11 +232,31 @@ impl StorageEngine {
         }
 
         latest.cloned()
-            .ok_or_else(|| StorageError::ChunkNotFound("No data found for metric".to_string()))
+            .ok_or_else(|| StorageError::ChunkNotFound(format!("No data found for metric: {}", metric)))
     }
 
     fn get_chunk_id(&self, timestamp: i64) -> i64 {
         timestamp - (timestamp % self.chunk_duration.as_secs() as i64)
+    }
+
+    /// Persist all dirty chunks to disk
+    pub fn flush_all(&self) -> Result<(), StorageError> {
+        if !self.persistence_enabled {
+            return Ok(());
+        }
+        
+        let chunks = self.chunks.read().unwrap();
+        
+        for chunk in chunks.values() {
+            if chunk.is_dirty() {
+                self.persist_chunk(chunk)?;
+            }
+        }
+        
+        // Truncate the WAL after all chunks are persisted
+        self.persistence.truncate_wal()?;
+        
+        Ok(())
     }
 
     pub fn cleanup_old_chunks(&self, retention: Duration) -> Result<(), StorageError> {
@@ -124,10 +266,20 @@ impl StorageEngine {
             .as_secs() as i64;
             
         let cutoff = now - retention.as_secs() as i64;
-        let mut chunks = self.chunks.write().unwrap();
         
+        // First flush all chunks to disk before removing old ones
+        self.flush_all()?;
+        
+        // Then remove old chunks
+        let mut chunks = self.chunks.write().unwrap();
         chunks.retain(|&chunk_start, _| chunk_start >= cutoff);
+        
         Ok(())
+    }
+    
+    /// Enable or disable persistence
+    pub fn set_persistence(&mut self, enabled: bool) {
+        self.persistence_enabled = enabled;
     }
 }
 
@@ -144,7 +296,7 @@ mod tests {
             },
             api: crate::config::ApiConfig {
                 host: "127.0.0.1".to_string(),
-                port: 5442,
+                port: 5432,
             },
             chunk_duration: Duration::from_secs(3600),
         }
@@ -153,7 +305,11 @@ mod tests {
     #[test]
     fn test_basic_operations() {
         let config = create_test_config();
-        let storage = StorageEngine::new(&config);
+        let storage = StorageEngine::new(&config).unwrap();
+        
+        // Disable persistence for tests
+        let mut storage_mut = unsafe { &mut *((&storage) as *const StorageEngine as *mut StorageEngine) };
+        storage_mut.set_persistence(false);
 
         let record = Record {
             timestamp: 1000,
