@@ -3,6 +3,9 @@ use crate::storage::{StorageEngine, Record, StorageError};
 use std::time::Duration;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use crate::timeseries::functions::{
+    TimeSeriesFunctions, TrendAnalysis, TimeSeriesStats, OutlierDetection
+};
 
 #[derive(Debug, Clone)]
 pub struct TimeSeriesQuery {
@@ -96,13 +99,13 @@ impl QueryEngine {
         Ok(results)
     }
 
-    pub fn query_latest(&self, metric: &str) -> Result<Record, QueryError> {
+    pub fn query_latest(&self, metric: &str) -> Result<Option<Record>, QueryError> {
         self.storage.as_ref()
             .get_latest(metric)
             .map_err(|e| QueryError::StorageError(e.to_string()))
     }
 
-    pub fn get_metrics_by_prefix(&self, prefix: &str) -> Result<Record, QueryError> {
+    pub fn get_metrics_by_prefix(&self, prefix: &str) -> Result<Option<Record>, QueryError> {
         println!("Searching for metrics with prefix: {}", prefix);
         
         let metrics = self.storage.as_ref().get_matching_metrics(prefix)
@@ -111,7 +114,7 @@ impl QueryEngine {
         println!("Found matching metrics: {:?}", metrics);
         
         if metrics.is_empty() {
-            return Err(QueryError::StorageError("No matching metrics found".to_string()));
+            return Ok(None);
         }
         
         let metric = &metrics[0];
@@ -255,6 +258,87 @@ impl QueryEngine {
         
         println!("Found {} time chunks with data", result.len());
         Ok(result)
+    }
+
+    /// Calculate trend analysis for a specific metric
+    pub fn calculate_trend(&self, metric: &str, start_time: i64, end_time: i64) 
+        -> Result<TrendAnalysis, QueryError> 
+    {
+        let records = self.storage.as_ref()
+            .query_range(start_time, end_time, metric)
+            .map_err(|e| QueryError::StorageError(e.to_string()))?;
+            
+        Ok(TimeSeriesFunctions::calculate_trend(&records))
+    }
+    
+    /// Calculate trend analysis for records by resource type
+    pub fn calculate_trend_by_resource(&self, resource_type: &str, metric_pattern: &str, start_time: i64, end_time: i64) 
+        -> Result<Vec<TrendAnalysis>, QueryError> 
+    {
+        // Get all metric names for this resource type
+        let metrics = self.storage.as_ref()
+            .get_metrics_by_resource_type(resource_type)
+            .map_err(|e| QueryError::StorageError(e.to_string()))?;
+            
+        // Filter metrics by pattern
+        let matching_metrics: Vec<String> = metrics.into_iter()
+            .filter(|m| m.contains(metric_pattern))
+            .collect();
+            
+        if matching_metrics.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Calculate trend for each matching metric
+        let mut results = Vec::new();
+        
+        for metric in matching_metrics {
+            let records = self.storage.as_ref()
+                .query_range(start_time, end_time, &metric)
+                .map_err(|e| QueryError::StorageError(e.to_string()))?;
+                
+            if !records.is_empty() {
+                results.push(TimeSeriesFunctions::calculate_trend(&records));
+            }
+        }
+        
+        // Sort results by absolute slope (largest change first)
+        results.sort_by(|a, b| b.slope.abs().partial_cmp(&a.slope.abs()).unwrap());
+        
+        Ok(results)
+    }
+    
+    /// Calculate statistics for a metric
+    pub fn calculate_stats(&self, metric: &str, start_time: i64, end_time: i64) 
+        -> Result<TimeSeriesStats, QueryError> 
+    {
+        let records = self.storage.as_ref()
+            .query_range(start_time, end_time, metric)
+            .map_err(|e| QueryError::StorageError(e.to_string()))?;
+            
+        Ok(TimeSeriesFunctions::calculate_stats(&records))
+    }
+    
+    /// Detect outliers for a metric
+    pub fn detect_outliers(&self, metric: &str, start_time: i64, end_time: i64, threshold: f64) 
+        -> Result<OutlierDetection, QueryError> 
+    {
+        let records = self.storage.as_ref()
+            .query_range(start_time, end_time, metric)
+            .map_err(|e| QueryError::StorageError(e.to_string()))?;
+            
+        Ok(TimeSeriesFunctions::detect_outliers(&records, threshold))
+    }
+    
+    /// Calculate rate of change for a metric
+    pub fn calculate_rate_of_change(&self, metric: &str, start_time: i64, end_time: i64, period_seconds: i64) 
+        -> Result<Vec<Record>, QueryError> 
+    {
+        let records = self.storage.as_ref()
+            .query_range(start_time, end_time, metric)
+            .map_err(|e| QueryError::StorageError(e.to_string()))?;
+            
+        Ok(TimeSeriesFunctions::calculate_rate_of_change(&records, period_seconds))
     }
 }
 

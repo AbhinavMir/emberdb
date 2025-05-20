@@ -190,9 +190,7 @@
             <div class="loading">Loading data from EmberDB FHIR server...</div>
         </div>
         
-        <h2>Raw JSON Response</h2>
-        <pre id="raw-json">Loading...</pre>
-        
+
         <script>
             // LOINC code dictionary for known codes
             const loincCodes = {
@@ -300,10 +298,6 @@
                     
                     const response = await fetch(`http://localhost:5432/fhir/resources/${resourceType}`);
                     const data = await response.json();
-                    
-                    // Display the raw JSON
-                    document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
-                    
                     // Display status information
                     const statusContainer = document.getElementById('status-container');
                     if (data.status === 'success') {

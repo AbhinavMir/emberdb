@@ -6,6 +6,7 @@
 //! - Time-based partitioning
 
 pub mod query;
+pub mod functions;
 
 #[cfg(test)]
 mod tests {

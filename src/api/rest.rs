@@ -162,6 +162,11 @@ impl RestApi {
             .or(self.get_resource_by_type())
             .or(self.debug_metrics())
             .or(self.get_time_chunked())
+            // Time-series analysis endpoints
+            .or(self.get_trend_analysis())
+            .or(self.get_stats())
+            .or(self.get_outliers())
+            .or(self.get_rate_of_change())
             .map(|reply| {
                 // Add CORS headers to all responses
                 with_header(
@@ -198,7 +203,7 @@ impl RestApi {
                         
                         // Query for records with this metric prefix
                         match query_engine.get_metrics_by_prefix(&metric_pattern) {
-                            Ok(record) => {
+                            Ok(Some(record)) => {
                                 let response = ApiResponse {
                                     status: "success".to_string(),
                                     message: "Observation found".to_string(),
@@ -206,10 +211,18 @@ impl RestApi {
                                 };
                                 Ok::<Json, Infallible>(warp::reply::json(&response))
                             },
-                            Err(_) => {
+                            Ok(None) => {
                                 let response = ApiResponse {
                                     status: "error".to_string(),
-                                    message: "No observations found".to_string(),
+                                    message: "No observations found".to_string(), 
+                                    data: None,
+                                };
+                                Ok::<Json, Infallible>(warp::reply::json(&response))
+                            },
+                            Err(e) => {
+                                let response = ApiResponse {
+                                    status: "error".to_string(),
+                                    message: format!("Error querying observations: {:?}", e),
                                     data: None,
                                 };
                                 Ok::<Json, Infallible>(warp::reply::json(&response))
@@ -811,6 +824,259 @@ impl RestApi {
                 }
             })
     }
+
+    /// Endpoint for trend analysis
+    fn get_trend_analysis(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("timeseries" / "trend")
+            .and(warp::get())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and_then(move |params: std::collections::HashMap<String, String>| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Parse parameters
+                    let resource_type = params.get("resource_type")
+                        .map(|s| s.to_string())
+                        .unwrap_or("Observation".to_string());
+                        
+                    let metric = params.get("metric")
+                        .map(|s| s.to_string())
+                        .unwrap_or("".to_string());
+                        
+                    let now = chrono::Utc::now().timestamp();
+                    let start_time = params.get("start")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now - 86400); // Default to last 24 hours
+                    
+                    let end_time = params.get("end")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now);
+                    
+                    if metric.is_empty() {
+                        // If no specific metric, do resource-wide analysis
+                        let pattern = params.get("pattern").map(|s| s.to_string()).unwrap_or("".to_string());
+                        
+                        match query_engine.calculate_trend_by_resource(&resource_type, &pattern, start_time, end_time) {
+                            Ok(trends) => {
+                                let response = ApiResponse {
+                                    status: "success".to_string(),
+                                    message: format!("Found trend analysis for {} metrics", trends.len()),
+                                    data: Some(serde_json::to_value(trends).unwrap()),
+                                };
+                                Ok::<Json, Infallible>(warp::reply::json(&response))
+                            },
+                            Err(e) => {
+                                let response = ApiResponse {
+                                    status: "error".to_string(),
+                                    message: format!("Failed to calculate trends: {:?}", e),
+                                    data: None,
+                                };
+                                Ok(warp::reply::json(&response))
+                            }
+                        }
+                    } else {
+                        // Specific metric trend analysis
+                        match query_engine.calculate_trend(&metric, start_time, end_time) {
+                            Ok(trend) => {
+                                let response = ApiResponse {
+                                    status: "success".to_string(),
+                                    message: format!("Trend analysis for metric: {}", metric),
+                                    data: Some(serde_json::to_value(trend).unwrap()),
+                                };
+                                Ok::<Json, Infallible>(warp::reply::json(&response))
+                            },
+                            Err(e) => {
+                                let response = ApiResponse {
+                                    status: "error".to_string(),
+                                    message: format!("Failed to calculate trend: {:?}", e),
+                                    data: None,
+                                };
+                                Ok(warp::reply::json(&response))
+                            }
+                        }
+                    }
+                }
+            })
+    }
+    
+    /// Endpoint for statistics
+    fn get_stats(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("timeseries" / "stats")
+            .and(warp::get())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and_then(move |params: std::collections::HashMap<String, String>| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Required parameter: metric
+                    let metric = match params.get("metric") {
+                        Some(m) => m.to_string(),
+                        None => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Missing required parameter: metric".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+                    
+                    // Parse time parameters
+                    let now = chrono::Utc::now().timestamp();
+                    let start_time = params.get("start")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now - 86400); // Default to last 24 hours
+                    
+                    let end_time = params.get("end")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now);
+                    
+                    // Calculate statistics
+                    match query_engine.calculate_stats(&metric, start_time, end_time) {
+                        Ok(stats) => {
+                            let response = ApiResponse {
+                                status: "success".to_string(),
+                                message: format!("Statistics for metric: {}", metric),
+                                data: Some(serde_json::to_value(stats).unwrap()),
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        },
+                        Err(e) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("Failed to calculate statistics: {:?}", e),
+                                data: None,
+                            };
+                            Ok(warp::reply::json(&response))
+                        }
+                    }
+                }
+            })
+    }
+    
+    /// Endpoint for outlier detection
+    fn get_outliers(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("timeseries" / "outliers")
+            .and(warp::get())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and_then(move |params: std::collections::HashMap<String, String>| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Required parameter: metric
+                    let metric = match params.get("metric") {
+                        Some(m) => m.to_string(),
+                        None => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Missing required parameter: metric".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+                    
+                    // Parse time parameters
+                    let now = chrono::Utc::now().timestamp();
+                    let start_time = params.get("start")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now - 86400); // Default to last 24 hours
+                    
+                    let end_time = params.get("end")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now);
+                    
+                    // Parse threshold
+                    let threshold = params.get("threshold")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(2.0); // Default Z-score threshold of 2.0
+                    
+                    // Detect outliers
+                    match query_engine.detect_outliers(&metric, start_time, end_time, threshold) {
+                        Ok(outliers) => {
+                            let response = ApiResponse {
+                                status: "success".to_string(),
+                                message: format!("Found {} outliers for metric: {}", outliers.outliers.len(), metric),
+                                data: Some(serde_json::to_value(outliers).unwrap()),
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        },
+                        Err(e) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("Failed to detect outliers: {:?}", e),
+                                data: None,
+                            };
+                            Ok(warp::reply::json(&response))
+                        }
+                    }
+                }
+            })
+    }
+    
+    /// Endpoint for rate of change calculation
+    fn get_rate_of_change(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("timeseries" / "rate")
+            .and(warp::get())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and_then(move |params: std::collections::HashMap<String, String>| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Required parameter: metric
+                    let metric = match params.get("metric") {
+                        Some(m) => m.to_string(),
+                        None => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Missing required parameter: metric".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+                    
+                    // Parse time parameters
+                    let now = chrono::Utc::now().timestamp();
+                    let start_time = params.get("start")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now - 86400); // Default to last 24 hours
+                    
+                    let end_time = params.get("end")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now);
+                    
+                    // Parse period
+                    let period = params.get("period")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(3600); // Default to hourly rate
+                    
+                    // Calculate rate of change
+                    match query_engine.calculate_rate_of_change(&metric, start_time, end_time, period) {
+                        Ok(rates) => {
+                            let response = ApiResponse {
+                                status: "success".to_string(),
+                                message: format!("Calculated {} rate points for metric: {}", rates.len(), metric),
+                                data: Some(serde_json::to_value(format_records_for_api(&rates)).unwrap()),
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        },
+                        Err(e) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("Failed to calculate rate of change: {:?}", e),
+                                data: None,
+                            };
+                            Ok(warp::reply::json(&response))
+                        }
+                    }
+                }
+            })
+    }
 }
 
 // Helper function to parse ISO8601 timestamp to Unix timestamp
@@ -886,7 +1152,9 @@ fn format_record_for_api(record: &Record) -> serde_json::Value {
     response
 }
 
-// Function to format a collection of records for API response
+/// Helper functions to format multiple records
 fn format_records_for_api(records: &[Record]) -> Vec<serde_json::Value> {
-    records.iter().map(format_record_for_api).collect()
+    records.iter()
+        .map(|record| format_record_for_api(record))
+        .collect()
 } 

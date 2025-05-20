@@ -134,15 +134,20 @@ impl TimeChunk {
             return Ok(Vec::new());
         }
 
-        self.records
-            .get(metric)
-            .map(|records| {
-                records
+        // Return empty Vec instead of error if metric not found
+        match self.records.get(metric) {
+            Some(records) => {
+                Ok(records
                     .iter()
                     .filter(|r| r.timestamp >= start && r.timestamp < end)
-                    .collect()
-            })
-            .ok_or_else(|| ChunkError::IndexError(format!("Metric not found: {}", metric)))
+                    .collect())
+            },
+            None => {
+                // Log that metric was not found but don't return error
+                println!("Metric not found in chunk: {}, returning empty result", metric);
+                Ok(Vec::new())
+            }
+        }
     }
 
     pub fn get_metric(&mut self, metric: &str) -> std::result::Result<&Vec<Record>, ChunkError> {
@@ -152,11 +157,20 @@ impl TimeChunk {
             .ok_or(ChunkError::IndexError(format!("Metric not found: {}", metric)))
     }
 
-    pub fn get_latest(&self, metric: &str) -> std::result::Result<&Record, ChunkError> {
-        self.records
-            .get(metric)
-            .and_then(|records| records.last())
-            .ok_or_else(|| ChunkError::IndexError(format!("No records found for metric: {}", metric)))
+    pub fn get_latest(&self, metric: &str) -> std::result::Result<Option<&Record>, ChunkError> {
+        match self.records.get(metric) {
+            Some(records) if !records.is_empty() => Ok(Some(records.last().unwrap())),
+            Some(_) => {
+                // Found the metric but it has no records
+                println!("Metric found but has no records: {}", metric);
+                Ok(None)
+            },
+            None => {
+                // Metric not found, don't return an error
+                println!("Metric not found in get_latest: {}", metric);
+                Ok(None)
+            }
+        }
     }
 
     pub fn get_metrics_list(&self) -> Vec<String> {

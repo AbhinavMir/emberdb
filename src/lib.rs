@@ -92,21 +92,24 @@ impl StorageEngine {
         Ok(results)
     }
 
-    pub fn get_latest(&self, metric: &str) -> Result<Record, StorageError> {
+    pub fn get_latest(&self, metric: &str) -> Result<Option<Record>, StorageError> {
         let chunks = self.chunks.read().unwrap();
         let mut latest: Option<&Record> = None;
         
         // Search through chunks in reverse chronological order
         for chunk in chunks.values() {
-            if let Ok(record) = chunk.get_latest(metric) {
-                if latest.is_none() || record.timestamp > latest.unwrap().timestamp {
-                    latest = Some(record);
-                }
+            match chunk.get_latest(metric) {
+                Ok(Some(record)) => {
+                    if latest.is_none() || record.timestamp > latest.unwrap().timestamp {
+                        latest = Some(record);
+                    }
+                },
+                Ok(None) => continue, // No record found in this chunk
+                Err(e) => return Err(StorageError::ChunkError(e)),
             }
         }
 
-        latest.cloned()
-            .ok_or_else(|| StorageError::ChunkNotFound("No data found for metric".to_string()))
+        Ok(latest.cloned())
     }
 
     fn get_chunk_id(&self, timestamp: i64) -> i64 {
