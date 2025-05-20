@@ -43,6 +43,14 @@ pub struct DebugMetricsInfo {
     pub storage_info: String,
 }
 
+// Additional structure to represent chunked time data
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimeChunk {
+    pub start_time: i64,
+    pub end_time: i64,
+    pub records: Vec<Record>,
+}
+
 pub struct QueryEngine {
     storage: Arc<StorageEngine>,
 }
@@ -200,6 +208,53 @@ impl QueryEngine {
         self.storage.as_ref()
             .debug_metrics()
             .map_err(|e| QueryError::StorageError(e.to_string()))
+    }
+
+    /// Query data in specific time chunks
+    pub fn query_time_chunked(&self, resource_type: &str, start_time: i64, end_time: i64, chunk_size_secs: u64) 
+        -> Result<Vec<TimeChunk>, QueryError> 
+    {
+        if start_time >= end_time {
+            return Err(QueryError::InvalidTimeRange(
+                "Start time must be before end time".to_string()
+            ));
+        }
+        
+        println!("Querying time-chunked data for resource type: {} from {} to {} with chunk size {}s", 
+            resource_type, start_time, end_time, chunk_size_secs);
+        
+        // First get all matching records
+        let records = self.query_by_resource_type(resource_type, start_time, end_time)?;
+        
+        // Group them by time chunks
+        let chunk_size = chunk_size_secs as i64;
+        let mut chunked_data: HashMap<i64, Vec<Record>> = HashMap::new();
+        
+        for record in records {
+            // Calculate which chunk this belongs to
+            let chunk_start = record.timestamp - (record.timestamp % chunk_size);
+            
+            chunked_data.entry(chunk_start)
+                .or_insert_with(Vec::new)
+                .push(record);
+        }
+        
+        // Convert to our response format
+        let mut result = Vec::new();
+        for (chunk_start, records) in chunked_data {
+            let chunk = TimeChunk {
+                start_time: chunk_start,
+                end_time: chunk_start + chunk_size,
+                records,
+            };
+            result.push(chunk);
+        }
+        
+        // Sort chunks by start time
+        result.sort_by_key(|chunk| chunk.start_time);
+        
+        println!("Found {} time chunks with data", result.len());
+        Ok(result)
     }
 }
 

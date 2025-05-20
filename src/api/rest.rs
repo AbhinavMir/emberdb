@@ -88,6 +88,7 @@ impl RestApi {
             .or(self.get_patient())
             .or(self.get_resource_by_type())
             .or(self.debug_metrics())
+            .or(self.get_time_chunked())
     }
 
     fn get_observation(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
@@ -340,6 +341,57 @@ impl RestApi {
                         data: Some(serde_json::to_value(debug_info).unwrap()),
                     };
                     Ok::<Json, Infallible>(warp::reply::json(&response))
+                }
+            })
+    }
+
+    // New endpoint for time-chunked queries
+    fn get_time_chunked(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("fhir" / "timeseries")
+            .and(warp::get())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and_then(move |params: std::collections::HashMap<String, String>| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Extract parameters
+                    let resource_type = params.get("resource_type").map(|s| s.to_string()).unwrap_or("Observation".to_string());
+                    
+                    // Parse time parameters
+                    let now = chrono::Utc::now().timestamp();
+                    let start_time = params.get("start")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now - 86400); // Default to last 24 hours
+                    
+                    let end_time = params.get("end")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now);
+                    
+                    // Parse chunk size (in seconds)
+                    let chunk_size = params.get("chunk_size")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(3600); // Default to 1 hour
+                    
+                    // Query with time chunking
+                    match query_engine.query_time_chunked(&resource_type, start_time, end_time, chunk_size) {
+                        Ok(chunks) => {
+                            let response = ApiResponse {
+                                status: "success".to_string(),
+                                message: format!("Found data in {} time chunks", chunks.len()),
+                                data: Some(serde_json::to_value(chunks).unwrap()),
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        },
+                        Err(_e) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Error querying time chunks".to_string(),
+                                data: None,
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        }
+                    }
                 }
             })
     }
