@@ -111,3 +111,21 @@ Traditional time-series databases excel at handling individual metrics but strug
 - Strict data retention and privacy rules
 
 EmberDB addresses these challenges while maintaining the performance characteristics of modern time-series databases.
+
+
+### TODOS
+Pattern detection (trend analysis, anomaly detection)
+Aggregation queries across patients/cohorts
+Performance Optimizations
+Implement data compression for time-series chunks
+Add caching layer for frequent queries
+Memory-mapped file support for larger datasets
+Add support for FHIR search parameters
+Implement FHIR Bulk Data API
+Add FHIR validation against profiles
+Multi-node distribution support
+Hot/cold storage tiering for historical data
+Backup and recovery utilities
+Add OAuth2/SMART on FHIR support
+Role-based access control for resources
+Audit logging for compliance
