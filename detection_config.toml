@@ -1,0 +1,52 @@
+# EmberDB Pattern Detection Configuration
+
+# Global settings
+[global]
+enable_all = true
+default_lookback_window = 86400  # 24 hours in seconds
+
+# Seasonal decomposition for detecting cyclical patterns
+[seasonal]
+enabled = true
+# Minimum data points needed for seasonal decomposition
+min_data_points = 24
+# Expected seasonality period in seconds (24 hours by default)
+period = 86400  
+# Decomposition method: "additive" or "multiplicative"
+method = "additive"
+
+# Multi-variate anomaly detection
+[multivariate]
+enabled = true
+# Correlation threshold to consider variables related
+correlation_threshold = 0.7
+# Variables to analyze together (empty means auto-detect correlations)
+groups = [
+  ["123|8867-4|beats/minute", "123|59408-5|%"],  # Heart rate and O2 saturation
+  ["123|85354-9|8480-6|mmHg", "123|85354-9|8462-4|mmHg"]  # Systolic and diastolic BP
+]
+# Detection method: "mahalanobis" or "isolation_forest"
+method = "mahalanobis"
+threshold = 3.0
+
+# Change point detection
+[changepoint]
+enabled = true
+# Minimum magnitude of change to detect
+threshold = 2.0
+# Method: "cusum" (cumulative sum) or "pelt" (pruned exact linear time)
+method = "cusum"
+# Penalty for adding a new change point (higher = fewer change points)
+penalty = 1.0
+
+# Moving window analysis
+[moving_window]
+enabled = true
+# Window size in seconds
+window_size = 3600  # 1 hour
+# Step size for window movement in seconds
+step_size = 900  # 15 minutes
+# Analysis method: "trend", "volatility", "range"
+method = "volatility"
+# Threshold for detecting significant changes in the window statistic
+threshold = 1.5 
