@@ -20,9 +20,10 @@ use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
-    pub timestamp: i64,
-    pub metric_name: String,
-    pub value: f64,
+    pub timestamp: i64,      // When the measurement was taken
+    pub metric_name: String, // Identifier for the measurement type
+    pub value: f64,          // The numeric value
+    pub context: HashMap<String, String>, // Additional context (device_id, etc.)
 }
 
 #[derive(Debug)]
@@ -366,6 +367,7 @@ mod tests {
             timestamp: 1000,
             metric_name: "test".to_string(),
             value: 42.0,
+            context: HashMap::new(),
         };
 
         assert!(storage.insert(record.clone()).is_ok());
