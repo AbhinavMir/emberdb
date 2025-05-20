@@ -116,7 +116,7 @@ impl RestApi {
                                 let response = ApiResponse {
                                     status: "success".to_string(),
                                     message: "Observation found".to_string(),
-                                    data: Some(serde_json::to_value(record).unwrap()),
+                                    data: Some(format_record_for_api(&record)),
                                 };
                                 Ok::<Json, Infallible>(warp::reply::json(&response))
                             },
@@ -306,7 +306,7 @@ impl RestApi {
                             let response = ApiResponse {
                                 status: "success".to_string(),
                                 message: format!("Found {} records for {}", records.len(), resource_type),
-                                data: Some(serde_json::to_value(records).unwrap()),
+                                data: Some(serde_json::to_value(format_records_for_api(&records)).unwrap()),
                             };
                             Ok::<Json, Infallible>(warp::reply::json(&response))
                         },
@@ -376,10 +376,19 @@ impl RestApi {
                     // Query with time chunking
                     match query_engine.query_time_chunked(&resource_type, start_time, end_time, chunk_size) {
                         Ok(chunks) => {
+                            // Transform each chunk to have better-formatted records
+                            let formatted_chunks: Vec<serde_json::Value> = chunks.iter().map(|chunk| {
+                                serde_json::json!({
+                                    "start_time": chunk.start_time,
+                                    "end_time": chunk.end_time,
+                                    "records": format_records_for_api(&chunk.records)
+                                })
+                            }).collect();
+                            
                             let response = ApiResponse {
                                 status: "success".to_string(),
                                 message: format!("Found data in {} time chunks", chunks.len()),
-                                data: Some(serde_json::to_value(chunks).unwrap()),
+                                data: Some(serde_json::to_value(formatted_chunks).unwrap()),
                             };
                             Ok::<Json, Infallible>(warp::reply::json(&response))
                         },
@@ -404,4 +413,40 @@ fn parse_iso8601_to_unix(iso_time: &str) -> Result<i64, Box<dyn std::error::Erro
     let timestamp = chrono::DateTime::parse_from_rfc3339(iso_time)?
         .timestamp();
     Ok(timestamp)
+}
+
+/// Helper function to transform a Record into an API-friendly response
+fn format_record_for_api(record: &Record) -> serde_json::Value {
+    // Extract patient ID from metric name (format: "{patient_id}|{code}|{unit}")
+    let patient_id = record.metric_name
+        .split('|')
+        .next()
+        .unwrap_or("unknown");
+        
+    // Build a better API response
+    let mut response = serde_json::json!({
+        "id": format!("{}:{}", record.resource_type, record.metric_name),
+        "resourceType": record.resource_type,
+        "timestamp": record.timestamp,
+        "value": record.value,
+        "subject": {
+            "reference": format!("Patient/{}", patient_id)
+        },
+        "metric_name": record.metric_name,
+    });
+    
+    // Add context elements directly to the top level
+    if !record.context.is_empty() {
+        let obj = response.as_object_mut().unwrap();
+        for (key, value) in &record.context {
+            obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+    }
+    
+    response
+}
+
+// Function to format a collection of records for API response
+fn format_records_for_api(records: &[Record]) -> Vec<serde_json::Value> {
+    records.iter().map(format_record_for_api).collect()
 } 
