@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use warp::Filter;
-use warp::reply::Json;
+use warp::reply::{Json, with_header};
 use std::convert::Infallible;
 use serde::{Deserialize, Serialize};
 use crate::timeseries::query::QueryEngine;
 use crate::fhir::{FHIRObservation, ObservationComponent};
+use crate::fhir::{MedicationAdministration, DeviceObservation, VitalSigns, VitalType};
 use crate::fhir::conversion::FHIRConverter;
 use crate::storage::Record;
 
@@ -45,14 +46,14 @@ pub struct CodeBlock {
     pub coding: Vec<Coding>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Coding {
     pub system: String,
     pub code: String,
     pub display: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Reference {
     pub reference: String,
 }
@@ -72,6 +73,59 @@ pub struct ApiResponse {
     pub data: Option<serde_json::Value>,
 }
 
+// New request for medication administration
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MedicationAdministrationRequest {
+    pub resourceType: String, // Should be "MedicationAdministration"
+    pub status: String,       // administration status
+    pub medication: CodeBlock, // medication code and display
+    pub dosage: DosageQuantity, // medication dose
+    pub route: Coding,        // administration route
+    pub subject: Reference,   // patient reference
+    pub effectiveDateTime: String, // when medication was administered
+    pub performer: Option<Reference>, // practitioner who administered
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DosageQuantity {
+    pub value: f64,
+    pub unit: String,
+    pub system: String,
+    pub code: String,
+}
+
+// New request for device observation
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeviceObservationRequest {
+    pub resourceType: String, // Should be "DeviceObservation"
+    pub status: String,
+    pub device: Reference,    // device reference
+    pub code: CodeBlock,      // observation code
+    pub valueQuantity: ValueQuantity, // measured value
+    pub effectiveDateTime: String,
+    pub subject: Option<Reference>, // optional patient reference
+    pub deviceType: String,   // type of device
+    pub metricType: String,   // type of metric
+}
+
+// New request for vital signs
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VitalSignsRequest {
+    pub resourceType: String, // Should be "VitalSigns"
+    pub code: CodeBlock,      // vital sign code
+    pub subject: Reference,   // patient reference
+    pub effectiveDateTime: String,
+    
+    // Value types - one will be populated
+    pub valueQuantity: Option<ValueQuantity>, // For single measurements
+    pub component: Option<Vec<FHIRObservationComponentRequest>>, // For blood pressure
+    
+    // Optional metadata
+    pub method: Option<Coding>, // measurement method
+    pub position: Option<Coding>, // patient position
+    pub reliability: Option<String>, // reliability indicator
+}
+
 pub struct RestApi {
     query_engine: Arc<QueryEngine>,
 }
@@ -82,13 +136,45 @@ impl RestApi {
     }
 
     pub fn routes(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        // Add OPTIONS route for CORS preflight requests
+        let cors_options = warp::options()
+            .map(|| {
+                warp::reply::with_header(
+                    warp::reply::with_header(
+                        warp::reply::with_header(
+                            warp::reply(),
+                            "Access-Control-Allow-Origin", "*"
+                        ),
+                        "Access-Control-Allow-Methods", "GET, POST, OPTIONS"
+                    ),
+                    "Access-Control-Allow-Headers", "Content-Type"
+                )
+            });
+        
         // Basic CRUD endpoints
-        self.get_observation()
+        cors_options
+            .or(self.get_observation())
             .or(self.post_observation())
             .or(self.get_patient())
+            .or(self.post_medication_administration())
+            .or(self.post_device_observation())
+            .or(self.post_vital_signs())
             .or(self.get_resource_by_type())
             .or(self.debug_metrics())
             .or(self.get_time_chunked())
+            .map(|reply| {
+                // Add CORS headers to all responses
+                with_header(
+                    with_header(
+                        with_header(
+                            reply,
+                            "Access-Control-Allow-Origin", "*"
+                        ),
+                        "Access-Control-Allow-Methods", "GET, POST, OPTIONS"
+                    ),
+                    "Access-Control-Allow-Headers", "Content-Type"
+                )
+            })
     }
 
     fn get_observation(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
@@ -404,6 +490,327 @@ impl RestApi {
                 }
             })
     }
+
+    fn post_medication_administration(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("fhir" / "MedicationAdministration")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and_then(move |request: MedicationAdministrationRequest| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Validate resource type
+                    if request.resourceType != "MedicationAdministration" {
+                        let response = ApiResponse {
+                            status: "error".to_string(),
+                            message: "Invalid resource type".to_string(),
+                            data: None,
+                        };
+                        return Ok::<Json, Infallible>(warp::reply::json(&response));
+                    }
+                    
+                    // Parse timestamp
+                    let timestamp = match parse_iso8601_to_unix(&request.effectiveDateTime) {
+                        Ok(ts) => ts,
+                        Err(_) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Invalid timestamp format".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+                    
+                    // Extract patient ID
+                    let patient_id = request.subject.reference.replace("Patient/", "");
+                    
+                    // Extract practitioner ID if present
+                    let practitioner_id = request.performer.as_ref()
+                        .map(|performer| performer.reference.replace("Practitioner/", ""));
+                    
+                    // Extract medication information
+                    let coding = &request.medication.coding[0];
+                    
+                    // Create MedicationAdministration
+                    let med_administration = MedicationAdministration {
+                        medication_code: coding.code.clone(),
+                        medication_display: coding.display.clone(),
+                        dose_value: request.dosage.value,
+                        dose_unit: request.dosage.unit.clone(),
+                        route: request.route.display.clone(),
+                        timestamp,
+                        patient_id,
+                        practitioner_id,
+                        status: request.status.clone(),
+                    };
+                    
+                    // Convert to records and store
+                    let records = med_administration.to_records();
+                    println!("Storing medication administration with metric name: {:?}", 
+                            records.iter().map(|r| &r.metric_name).collect::<Vec<_>>());
+                    
+                    for record in records {
+                        if let Err(err) = query_engine.store_record(record) {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("Failed to store medication administration: {:?}", err),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    }
+                    
+                    let response = ApiResponse {
+                        status: "success".to_string(),
+                        message: "Medication administration stored successfully".to_string(),
+                        data: Some(serde_json::to_value(request).unwrap()),
+                    };
+                    Ok(warp::reply::json(&response))
+                }
+            })
+    }
+
+    fn post_device_observation(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("fhir" / "DeviceObservation")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and_then(move |request: DeviceObservationRequest| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Validate resource type
+                    if request.resourceType != "DeviceObservation" {
+                        let response = ApiResponse {
+                            status: "error".to_string(),
+                            message: "Invalid resource type".to_string(),
+                            data: None,
+                        };
+                        return Ok::<Json, Infallible>(warp::reply::json(&response));
+                    }
+                    
+                    // Parse timestamp
+                    let timestamp = match parse_iso8601_to_unix(&request.effectiveDateTime) {
+                        Ok(ts) => ts,
+                        Err(_) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Invalid timestamp format".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+                    
+                    // Extract device ID
+                    let device_id = request.device.reference.replace("Device/", "");
+                    
+                    // Extract patient ID if present
+                    let patient_id = request.subject.as_ref()
+                        .map(|subject| subject.reference.replace("Patient/", ""));
+                    
+                    // Extract code
+                    let coding = &request.code.coding[0];
+                    
+                    // Create device observation
+                    let device_observation = DeviceObservation {
+                        device_id,
+                        device_type: request.deviceType.clone(),
+                        metric_type: request.metricType.clone(),
+                        code: coding.code.clone(),
+                        value: request.valueQuantity.value,
+                        unit: request.valueQuantity.unit.clone(),
+                        timestamp,
+                        patient_id,
+                        status: request.status.clone(),
+                    };
+                    
+                    // Convert to records and store
+                    let records = device_observation.to_records();
+                    println!("Storing device observation with metric name: {:?}", 
+                            records.iter().map(|r| &r.metric_name).collect::<Vec<_>>());
+                    
+                    for record in records {
+                        if let Err(err) = query_engine.store_record(record) {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("Failed to store device observation: {:?}", err),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    }
+                    
+                    let response = ApiResponse {
+                        status: "success".to_string(),
+                        message: "Device observation stored successfully".to_string(),
+                        data: Some(serde_json::to_value(request).unwrap()),
+                    };
+                    Ok(warp::reply::json(&response))
+                }
+            })
+    }
+
+    fn post_vital_signs(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("fhir" / "VitalSigns")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and_then(move |request: VitalSignsRequest| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Validate resource type
+                    if request.resourceType != "VitalSigns" {
+                        let response = ApiResponse {
+                            status: "error".to_string(),
+                            message: "Invalid resource type".to_string(),
+                            data: None,
+                        };
+                        return Ok::<Json, Infallible>(warp::reply::json(&response));
+                    }
+                    
+                    // Parse timestamp
+                    let timestamp = match parse_iso8601_to_unix(&request.effectiveDateTime) {
+                        Ok(ts) => ts,
+                        Err(_) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Invalid timestamp format".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+                    
+                    // Extract patient ID
+                    let patient_id = request.subject.reference.replace("Patient/", "");
+                    
+                    // Extract optional metadata
+                    let method = request.method.as_ref().map(|m| m.display.clone());
+                    let position = request.position.as_ref().map(|p| p.display.clone());
+                    let reliability = request.reliability.clone();
+                    
+                    // Get main code
+                    let coding = &request.code.coding[0];
+                    let code = coding.code.clone();
+                    
+                    // Determine vital type and create VitalSigns object
+                    let vital_signs = if let Some(value_quantity) = &request.valueQuantity {
+                        // Single vital sign
+                        let vital_type = match code.as_str() {
+                            "8867-4" => VitalType::HeartRate,
+                            "9279-1" => VitalType::RespiratoryRate,
+                            "59408-5" => VitalType::OxygenSaturation,
+                            "8310-5" => VitalType::Temperature,
+                            "29463-7" => VitalType::Weight,
+                            "8302-2" => VitalType::Height,
+                            _ => {
+                                let response = ApiResponse {
+                                    status: "error".to_string(),
+                                    message: format!("Unknown vital sign code: {}", code),
+                                    data: None,
+                                };
+                                return Ok(warp::reply::json(&response));
+                            }
+                        };
+                        
+                        // Create VitalSigns object
+                        VitalSigns {
+                            vital_type,
+                            value: value_quantity.value,
+                            unit: value_quantity.unit.clone(),
+                            timestamp,
+                            patient_id,
+                            method,
+                            position,
+                            reliability,
+                        }
+                    } else if let Some(components) = &request.component {
+                        // Check if this is blood pressure (has systolic and diastolic)
+                        if code == "85354-9" && components.len() == 2 { // 85354-9 is BP panel
+                            // Find systolic and diastolic components
+                            let mut systolic = None;
+                            let mut diastolic = None;
+                            
+                            for component in components {
+                                let comp_code = &component.code.coding[0].code;
+                                if comp_code == "8480-6" { // Systolic
+                                    systolic = Some(component.valueQuantity.value);
+                                } else if comp_code == "8462-4" { // Diastolic
+                                    diastolic = Some(component.valueQuantity.value);
+                                }
+                            }
+                            
+                            if let (Some(sys), Some(dia)) = (systolic, diastolic) {
+                                // Get unit from first component
+                                let unit = components[0].valueQuantity.unit.clone();
+                                
+                                VitalSigns {
+                                    vital_type: VitalType::BloodPressure {
+                                        systolic: sys,
+                                        diastolic: dia,
+                                    },
+                                    value: sys, // Store systolic as the main value for consistency
+                                    unit,
+                                    timestamp,
+                                    patient_id,
+                                    method,
+                                    position,
+                                    reliability,
+                                }
+                            } else {
+                                let response = ApiResponse {
+                                    status: "error".to_string(),
+                                    message: "Blood pressure must have both systolic and diastolic components".to_string(),
+                                    data: None,
+                                };
+                                return Ok(warp::reply::json(&response));
+                            }
+                        } else {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: "Invalid component-based vital sign".to_string(),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    } else {
+                        let response = ApiResponse {
+                            status: "error".to_string(),
+                            message: "No valid vital sign value provided".to_string(),
+                            data: None,
+                        };
+                        return Ok(warp::reply::json(&response));
+                    };
+                    
+                    // Convert to records and store
+                    let records = vital_signs.to_records();
+                    println!("Storing vital signs with metric names: {:?}", 
+                            records.iter().map(|r| &r.metric_name).collect::<Vec<_>>());
+                    
+                    for record in records {
+                        if let Err(err) = query_engine.store_record(record) {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("Failed to store vital signs: {:?}", err),
+                                data: None,
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    }
+                    
+                    let response = ApiResponse {
+                        status: "success".to_string(),
+                        message: "Vital signs stored successfully".to_string(),
+                        data: Some(serde_json::to_value(request).unwrap()),
+                    };
+                    Ok(warp::reply::json(&response))
+                }
+            })
+    }
 }
 
 // Helper function to parse ISO8601 timestamp to Unix timestamp
@@ -417,22 +824,55 @@ fn parse_iso8601_to_unix(iso_time: &str) -> Result<i64, Box<dyn std::error::Erro
 
 /// Helper function to transform a Record into an API-friendly response
 fn format_record_for_api(record: &Record) -> serde_json::Value {
-    // Extract patient ID from metric name (format: "{patient_id}|{code}|{unit}")
-    let patient_id = record.metric_name
-        .split('|')
-        .next()
-        .unwrap_or("unknown");
-        
-    // Build a better API response
+    // Extract components from metric name (format: "{patient_id}|{code}|{unit}")
+    let parts: Vec<&str> = record.metric_name.split('|').collect();
+    
+    // Extract patient ID, code, and unit
+    let patient_id = parts.get(0).unwrap_or(&"unknown");
+    let code = parts.get(1).unwrap_or(&"unknown");
+    let unit = parts.get(2).unwrap_or(&"unknown");
+    
+    // Add code display name when possible
+    let code_display = match *code {
+        "8867-4" => "Heart Rate",
+        "85354-9" => "Blood Pressure Panel",
+        "8480-6" => "Systolic Blood Pressure",
+        "8462-4" => "Diastolic Blood Pressure",
+        "8310-5" => "Body Temperature",
+        "9279-1" => "Respiratory Rate",
+        "59408-5" => "Oxygen Saturation",
+        "2339-0" => "Blood Glucose",
+        _ => ""
+    };
+    
+    // Format the timestamp as an ISO string for convenience
+    let iso_date = if record.timestamp > 0 {
+        use chrono::{DateTime, Utc};
+        DateTime::<Utc>::from_timestamp(record.timestamp, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "invalid_timestamp".to_string())
+    } else {
+        "unknown".to_string()
+    };
+    
+    // Build an enhanced API response
     let mut response = serde_json::json!({
         "id": format!("{}:{}", record.resource_type, record.metric_name),
         "resourceType": record.resource_type,
         "timestamp": record.timestamp,
+        "iso_date": iso_date,
         "value": record.value,
         "subject": {
             "reference": format!("Patient/{}", patient_id)
         },
         "metric_name": record.metric_name,
+        "metric_components": {
+            "patient_id": patient_id,
+            "code": code,
+            "unit": unit
+        },
+        "code_system": "http://loinc.org",
+        "code_display": code_display
     });
     
     // Add context elements directly to the top level

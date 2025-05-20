@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EmberDB - FHIR Observation Viewer</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f7f9fc;
+            color: #333;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #eaeaea;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+        .status-box {
+            background-color: #e8f5e9;
+            border-left: 5px solid #4caf50;
+            padding: 15px;
+            margin-bottom: 25px;
+            border-radius: 4px;
+        }
+        .error-box {
+            background-color: #ffebee;
+            border-left: 5px solid #f44336;
+            padding: 15px;
+            margin-bottom: 25px;
+            border-radius: 4px;
+        }
+        .loading {
+            text-align: center;
+            padding: 30px;
+            font-style: italic;
+            color: #666;
+            background-color: #f8f8f8;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 25px 0;
+            font-size: 14px;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #eaeaea;
+        }
+        th {
+            background-color: #f5f7fa;
+            font-weight: 600;
+            color: #2c3e50;
+            position: sticky;
+            top: 0;
+        }
+        tr:hover {
+            background-color: #f5f9ff;
+        }
+        pre {
+            background-color: #f8f8f8;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .metric-value {
+            font-weight: bold;
+            font-size: 16px;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            font-size: 12px;
+            border-radius: 4px;
+            margin-right: 5px;
+            background-color: #e1f5fe;
+            color: #0277bd;
+        }
+        .loinc-code {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .patient-id {
+            background-color: #fff8e1;
+            color: #ff8f00;
+        }
+        .unit {
+            background-color: #f3e5f5;
+            color: #7b1fa2;
+        }
+        h2 {
+            margin-top: 30px;
+            color: #455a64;
+            font-size: 20px;
+        }
+        .date-display {
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>EmberDB - FHIR Observation Viewer</h1>
+        
+        <div id="status-container"></div>
+        
+        <div id="observations-table-container">
+            <div class="loading">Loading data from EmberDB FHIR server...</div>
+        </div>
+        
+        <h2>Raw JSON Response</h2>
+        <pre id="raw-json">Loading...</pre>
+        
+        <script>
+            // LOINC code dictionary for known codes
+            const loincCodes = {
+                "8867-4": "Heart Rate",
+                "85354-9": "Blood Pressure Panel",
+                "8480-6": "Systolic Blood Pressure",
+                "8462-4": "Diastolic Blood Pressure",
+                "8310-5": "Body Temperature",
+                "9279-1": "Respiratory Rate",
+                "59408-5": "Oxygen Saturation",
+                "2339-0": "Blood Glucose"
+            };
+            
+            // Function to look up LOINC code display name
+            function getLoincDisplay(code) {
+                return loincCodes[code] || code;
+            }
+            
+            // Function to format timestamp to readable date
+            function formatTimestamp(timestamp) {
+                const date = new Date(timestamp * 1000);
+                return `<span class="date-display">${date.toLocaleDateString()} ${date.toLocaleTimeString()}</span>`;
+            }
+            
+            // Function to parse metric name components
+            function parseMetricName(metricName) {
+                const parts = metricName.split('|');
+                if (parts.length >= 3) {
+                    const [patientId, loincCode, unit] = parts;
+                    return {
+                        patientId,
+                        loincCode,
+                        unit,
+                        loincDisplay: getLoincDisplay(loincCode)
+                    };
+                }
+                return { patientId: 'unknown', loincCode: 'unknown', unit: 'unknown', loincDisplay: 'Unknown' };
+            }
+            
+            // Function to fetch FHIR observation data
+            async function fetchObservations() {
+                try {
+                    // Add a dropdown for resource types
+                    const resourceTypeSelector = `
+                        <div style="margin-bottom: 20px">
+                            <label for="resource-type">Select Resource Type: </label>
+                            <select id="resource-type" onchange="changeResourceType()">
+                                <option value="Observation">Observation</option>
+                                <option value="MedicationAdministration">Medication Administration</option>
+                                <option value="DeviceObservation">Device Observation</option>
+                                <option value="VitalSigns">Vital Signs</option>
+                            </select>
+                            <button onclick="refreshData()" style="margin-left: 10px">Refresh Data</button>
+                        </div>
+                    `;
+                    
+                    // Add the selector to the page if it doesn't exist yet
+                    if (!document.getElementById('resource-type')) {
+                        document.getElementById('status-container').insertAdjacentHTML('beforebegin', resourceTypeSelector);
+                    }
+                    
+                    // Get the selected resource type
+                    const resourceType = document.getElementById('resource-type')?.value || 'Observation';
+                    
+                    const response = await fetch(`http://localhost:5432/fhir/resources/${resourceType}`);
+                    const data = await response.json();
+                    
+                    // Display the raw JSON
+                    document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
+                    
+                    // Display status information
+                    const statusContainer = document.getElementById('status-container');
+                    if (data.status === 'success') {
+                        statusContainer.innerHTML = `
+                            <div class="status-box">
+                                <strong>Status:</strong> ${data.status}<br>
+                                <strong>Message:</strong> ${data.message}
+                            </div>
+                        `;
+                    } else {
+                        statusContainer.innerHTML = `
+                            <div class="error-box">
+                                <strong>Status:</strong> ${data.status}<br>
+                                <strong>Message:</strong> ${data.message || 'Unknown error'}
+                            </div>
+                        `;
+                    }
+                    
+                    // Create the observations table
+                    const tableContainer = document.getElementById('observations-table-container');
+                    
+                    if (data.data && data.data.length > 0) {
+                        // Render table based on resource type
+                        if (resourceType === 'Observation') {
+                            renderObservationTable(data.data, tableContainer);
+                        } else if (resourceType === 'MedicationAdministration') {
+                            renderMedicationTable(data.data, tableContainer);
+                        } else if (resourceType === 'DeviceObservation') {
+                            renderDeviceTable(data.data, tableContainer);
+                        } else if (resourceType === 'VitalSigns') {
+                            renderVitalSignsTable(data.data, tableContainer);
+                        } else {
+                            renderGenericTable(data.data, tableContainer);
+                        }
+                    } else {
+                        tableContainer.innerHTML = `<p>No ${resourceType} data found.</p>`;
+                    }
+                    
+                } catch (error) {
+                    console.error('Error fetching FHIR data:', error);
+                    document.getElementById('status-container').innerHTML = `
+                        <div class="error-box">
+                            <strong>Error:</strong> Failed to fetch data from FHIR server.<br>
+                            <strong>Details:</strong> ${error.message}
+                        </div>
+                    `;
+                    document.getElementById('observations-table-container').innerHTML = 
+                        '<p>Could not load observation data. Please check the console for details.</p>';
+                    document.getElementById('raw-json').textContent = 'Failed to load data.';
+                }
+            }
+            
+            // Function to change resource type
+            function changeResourceType() {
+                refreshData();
+            }
+            
+            // Function to refresh data
+            function refreshData() {
+                fetchObservations();
+            }
+            
+            // Fetch data when the page loads
+            document.addEventListener('DOMContentLoaded', fetchObservations);
+
+            // Function to render Observation table
+            function renderObservationTable(data, container) {
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Observation</th>
+                                <th>Value</th>
+                                <th>Patient</th>
+                                <th>Timestamp</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                data.forEach(obs => {
+                    const metricInfo = parseMetricName(obs.metric_name || '');
+                    
+                    tableHTML += `
+                        <tr>
+                            <td>
+                                <strong>${metricInfo.loincDisplay}</strong><br>
+                                <span class="badge loinc-code">${metricInfo.loincCode}</span>
+                            </td>
+                            <td class="metric-value">${obs.value !== undefined ? obs.value : 'N/A'} 
+                                <span class="badge unit">${metricInfo.unit}</span>
+                            </td>
+                            <td>
+                                <span class="badge patient-id">${metricInfo.patientId}</span><br>
+                                ${obs.subject ? obs.subject.reference : 'N/A'}
+                            </td>
+                            <td>${obs.timestamp ? formatTimestamp(obs.timestamp) : 'N/A'}</td>
+                            <td>
+                                ID: ${obs.id || 'N/A'}<br>
+                                Type: ${obs.resourceType || 'N/A'}
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                
+                container.innerHTML = tableHTML;
+            }
+
+            // Function to render Medication Administration table
+            function renderMedicationTable(data, container) {
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Medication</th>
+                                <th>Dosage</th>
+                                <th>Patient</th>
+                                <th>Timestamp</th>
+                                <th>Administration</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                data.forEach(med => {
+                    const metricParts = med.metric_name ? med.metric_name.split('|') : ['', '', ''];
+                    const medicationCode = metricParts[1] || '';
+                    const doseUnit = metricParts[2] || '';
+                    
+                    tableHTML += `
+                        <tr>
+                            <td>
+                                <strong>${med.medication_display || 'Unknown Medication'}</strong><br>
+                                <span class="badge loinc-code">${medicationCode}</span>
+                            </td>
+                            <td class="metric-value">${med.value || 'N/A'} 
+                                <span class="badge unit">${doseUnit}</span>
+                            </td>
+                            <td>
+                                <span class="badge patient-id">${metricParts[0] || 'Unknown'}</span><br>
+                                ${med.subject ? med.subject.reference : 'N/A'}
+                            </td>
+                            <td>${med.timestamp ? formatTimestamp(med.timestamp) : 'N/A'}</td>
+                            <td>
+                                Route: ${med.route || 'N/A'}<br>
+                                Status: ${med.status || 'completed'}<br>
+                                ${med.practitioner_id ? `Provider: ${med.practitioner_id}` : ''}
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                
+                container.innerHTML = tableHTML;
+            }
+
+            // Function to render Device Observation table
+            function renderDeviceTable(data, container) {
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Device</th>
+                                <th>Measurement</th>
+                                <th>Value</th>
+                                <th>Timestamp</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                data.forEach(device => {
+                    const metricParts = device.metric_name ? device.metric_name.split('|') : ['', '', ''];
+                    const deviceId = metricParts[0] || '';
+                    const code = metricParts[1] || '';
+                    const unit = metricParts[2] || '';
+                    
+                    tableHTML += `
+                        <tr>
+                            <td>
+                                <strong>${device.device_type || 'Unknown Device'}</strong><br>
+                                <span class="badge">${deviceId}</span>
+                            </td>
+                            <td>
+                                <span class="badge loinc-code">${code}</span><br>
+                                Type: ${device.metric_type || 'measurement'}
+                            </td>
+                            <td class="metric-value">${device.value !== undefined ? device.value : 'N/A'} 
+                                <span class="badge unit">${unit}</span>
+                            </td>
+                            <td>${device.timestamp ? formatTimestamp(device.timestamp) : 'N/A'}</td>
+                            <td>
+                                Status: ${device.status || 'N/A'}<br>
+                                ${device.patient_id ? `<span class="badge patient-id">Patient: ${device.patient_id}</span>` : 'No patient'}
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                
+                container.innerHTML = tableHTML;
+            }
+
+            // Function to render Vital Signs table
+            function renderVitalSignsTable(data, container) {
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Vital Sign</th>
+                                <th>Value</th>
+                                <th>Patient</th>
+                                <th>Timestamp</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                data.forEach(vital => {
+                    const metricParts = vital.metric_name ? vital.metric_name.split('|') : ['', '', ''];
+                    const patientId = metricParts[0] || '';
+                    const code = metricParts[1] || '';
+                    const unit = metricParts[2] || '';
+                    
+                    // Determine vital sign type from code
+                    let vitalName = '';
+                    switch(code) {
+                        case '8867-4': vitalName = 'Heart Rate'; break;
+                        case '9279-1': vitalName = 'Respiratory Rate'; break;
+                        case '59408-5': vitalName = 'Oxygen Saturation'; break;
+                        case '8310-5': vitalName = 'Body Temperature'; break;
+                        case '29463-7': vitalName = 'Body Weight'; break;
+                        case '8302-2': vitalName = 'Body Height'; break;
+                        case '8480-6': vitalName = 'Blood Pressure (Systolic)'; break;
+                        case '8462-4': vitalName = 'Blood Pressure (Diastolic)'; break;
+                        default: vitalName = vital.vital_type || 'Unknown Vital';
+                    }
+                    
+                    // Check for blood pressure components
+                    let valueDisplay = '';
+                    if (code === '8480-6' && vital.bp_diastolic) {
+                        valueDisplay = `${vital.value}/${vital.bp_diastolic} <span class="badge unit">${unit}</span>`;
+                    } else if (code === '8462-4' && vital.bp_systolic) {
+                        valueDisplay = `${vital.bp_systolic}/${vital.value} <span class="badge unit">${unit}</span>`;
+                    } else {
+                        valueDisplay = `${vital.value !== undefined ? vital.value : 'N/A'} <span class="badge unit">${unit}</span>`;
+                    }
+                    
+                    tableHTML += `
+                        <tr>
+                            <td>
+                                <strong>${vitalName}</strong><br>
+                                <span class="badge loinc-code">${code}</span>
+                            </td>
+                            <td class="metric-value">${valueDisplay}</td>
+                            <td>
+                                <span class="badge patient-id">${patientId}</span><br>
+                                ${vital.subject ? vital.subject.reference : 'N/A'}
+                            </td>
+                            <td>${vital.timestamp ? formatTimestamp(vital.timestamp) : 'N/A'}</td>
+                            <td>
+                                ${vital.method ? `Method: ${vital.method}<br>` : ''}
+                                ${vital.position ? `Position: ${vital.position}<br>` : ''}
+                                ${vital.reliability ? `Reliability: ${vital.reliability}` : ''}
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                
+                container.innerHTML = tableHTML;
+            }
+
+            // Catch-all renderer for any resource type
+            function renderGenericTable(data, container) {
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Resource ID</th>
+                                <th>Type</th>
+                                <th>Timestamp</th>
+                                <th>Value</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                data.forEach(item => {
+                    tableHTML += `
+                        <tr>
+                            <td>${item.id || 'N/A'}</td>
+                            <td>${item.resourceType || 'Unknown'}</td>
+                            <td>${item.timestamp ? formatTimestamp(item.timestamp) : 'N/A'}</td>
+                            <td>${item.value !== undefined ? item.value : 'N/A'}</td>
+                            <td>
+                                <pre style="max-height: 100px; overflow: auto; font-size: 11px;">${JSON.stringify(item, null, 2)}</pre>
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+                
+                container.innerHTML = tableHTML;
+            }
+        </script>
+    </div>
+</body>
+</html>

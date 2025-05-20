@@ -3,12 +3,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write, Seek, SeekFrom};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use serde::{Serialize, Deserialize};
 use serde_json;
 
 use super::chunk::TimeChunk;
 use super::Record;
-use super::ChunkError;
 use super::StorageError;
 
 /// Manages storage and retrieval of chunks from disk
