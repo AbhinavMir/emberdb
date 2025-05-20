@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crate::storage::{StorageEngine, Record, StorageError};
 use std::time::Duration;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone)]
 pub struct TimeSeriesQuery {
@@ -32,6 +33,14 @@ impl From<StorageError> for QueryError {
     fn from(error: StorageError) -> Self {
         QueryError::StorageError(format!("{:?}", error))
     }
+}
+
+// Add this new struct for debug info
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct DebugMetricsInfo {
+    pub metrics: Vec<String>,
+    pub resource_metrics: HashMap<String, Vec<String>>,
+    pub storage_info: String,
 }
 
 pub struct QueryEngine {
@@ -101,6 +110,32 @@ impl QueryEngine {
         self.query_latest(metric)
     }
 
+    /// Query records by resource type and time range
+    pub fn query_by_resource_type(&self, resource_type: &str, start_time: i64, end_time: i64) 
+        -> Result<Vec<Record>, QueryError> 
+    {
+        if start_time >= end_time {
+            return Err(QueryError::InvalidTimeRange(
+                "Start time must be before end time".to_string()
+            ));
+        }
+        
+        println!("Querying records for resource type: {}", resource_type);
+        
+        self.storage.as_ref()
+            .query_by_resource_type(resource_type, start_time, end_time)
+            .map_err(|e| QueryError::StorageError(e.to_string()))
+    }
+    
+    /// Get metrics for a specific resource type
+    pub fn get_metrics_by_resource_type(&self, resource_type: &str) -> Result<Vec<String>, QueryError> {
+        println!("Getting metrics for resource type: {}", resource_type);
+        
+        self.storage.as_ref()
+            .get_metrics_by_resource_type(resource_type)
+            .map_err(|e| QueryError::StorageError(e.to_string()))
+    }
+
     fn aggregate_records(
         &self,
         records: Vec<Record>,
@@ -155,7 +190,16 @@ impl QueryEngine {
             metric_name: first_record.metric_name.clone(),
             value,
             context: first_record.context.clone(),
+            resource_type: first_record.resource_type.clone(),
         }
+    }
+
+    /// Get debug info about metrics and resources
+    pub fn debug_metrics(&self) -> Result<DebugMetricsInfo, QueryError> {
+        // Get the raw debug info from storage
+        self.storage.as_ref()
+            .debug_metrics()
+            .map_err(|e| QueryError::StorageError(e.to_string()))
     }
 }
 

@@ -17,6 +17,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 use crate::config::Config;
 use std::fmt;
+use crate::timeseries::query::DebugMetricsInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -24,6 +25,7 @@ pub struct Record {
     pub metric_name: String, // Identifier for the measurement type
     pub value: f64,          // The numeric value
     pub context: HashMap<String, String>, // Additional context (device_id, etc.)
+    pub resource_type: String, // FHIR resource type (Observation, DeviceMetric, etc.)
 }
 
 #[derive(Debug)]
@@ -172,7 +174,7 @@ impl StorageEngine {
         // Check if the chunk is full and should be persisted
         let should_persist = chunk.is_full();
         
-        // If we need to persist, clone the chunk before releasing the lock
+        // If the chunk is full, we need to persist it, but we'll do that after releasing the lock
         let chunk_to_persist = if should_persist && self.persistence_enabled {
             Some((chunk_id, chunk.clone()))
         } else {
@@ -183,30 +185,19 @@ impl StorageEngine {
         drop(chunks);
         
         // Persist the chunk if needed
-        if let Some((_, chunk)) = chunk_to_persist {
-            self.persist_chunk(&chunk)?;
-        }
-        
-        Ok(())
-    }
-
-    /// Persist a chunk to disk
-    fn persist_chunk(&self, chunk: &TimeChunk) -> Result<(), StorageError> {
-        if !self.persistence_enabled {
-            return Ok(());
-        }
-        
-        // Save the chunk
-        self.persistence.save_chunk(chunk)?;
-        
-        // Mark the chunk as durable in the WAL
-        let chunk_duration_secs = self.chunk_duration.as_secs() as i64;
-        self.persistence.mark_chunk_durable(chunk.start_time, chunk_duration_secs)?;
-        
-        // Mark chunk as clean
-        let mut chunks = self.chunks.write().unwrap();
-        if let Some(chunk) = chunks.get_mut(&chunk.start_time) {
-            chunk.mark_clean();
+        if let Some((chunk_id, chunk)) = chunk_to_persist {
+            // Save the chunk
+            self.persistence.save_chunk(&chunk)?;
+            
+            // Mark the chunk as durable in the WAL
+            let chunk_duration_secs = self.chunk_duration.as_secs() as i64;
+            self.persistence.mark_chunk_durable(chunk.start_time, chunk_duration_secs)?;
+            
+            // Mark chunk as clean with a separate write lock
+            let mut chunks = self.chunks.write().unwrap();
+            if let Some(chunk) = chunks.get_mut(&chunk_id) {
+                chunk.mark_clean();
+            }
         }
         
         Ok(())
@@ -262,18 +253,46 @@ impl StorageEngine {
         }
         
         println!("Starting to flush all dirty chunks to disk...");
-        let chunks = self.chunks.read().unwrap();
-        println!("Total chunks in memory: {}", chunks.len());
         
+        // First, identify dirty chunks while holding the read lock
+        let chunks_to_flush = {
+            let chunks = self.chunks.read().unwrap();
+            println!("Total chunks in memory: {}", chunks.len());
+            
+            chunks.iter()
+                .filter(|(_, chunk)| chunk.is_dirty())
+                .map(|(id, chunk)| (*id, chunk.clone()))
+                .collect::<Vec<_>>()
+        };
+        
+        // Now flush each dirty chunk without holding any locks
         let mut flushed_count = 0;
-        for (chunk_id, chunk) in chunks.iter() {
-            if chunk.is_dirty() {
-                println!("Flushing dirty chunk with ID: {}", chunk_id);
-                if let Err(e) = self.persist_chunk(chunk) {
-                    println!("Error flushing chunk {}: {:?}", chunk_id, e);
-                    return Err(e);
+        for (chunk_id, chunk) in &chunks_to_flush {
+            println!("Flushing dirty chunk with ID: {}", chunk_id);
+            
+            // Save the chunk
+            if let Err(e) = self.persistence.save_chunk(chunk) {
+                println!("Error saving chunk {}: {:?}", chunk_id, e);
+                return Err(e);
+            }
+            
+            // Mark the chunk as durable in the WAL
+            let chunk_duration_secs = self.chunk_duration.as_secs() as i64;
+            if let Err(e) = self.persistence.mark_chunk_durable(chunk.start_time, chunk_duration_secs) {
+                println!("Error marking chunk {} as durable: {:?}", chunk_id, e);
+                return Err(e);
+            }
+            
+            flushed_count += 1;
+        }
+        
+        // Finally, mark all flushed chunks as clean with a write lock
+        if !chunks_to_flush.is_empty() {
+            let mut chunks = self.chunks.write().unwrap();
+            for (chunk_id, _) in chunks_to_flush {
+                if let Some(chunk) = chunks.get_mut(&chunk_id) {
+                    chunk.mark_clean();
                 }
-                flushed_count += 1;
             }
         }
         
@@ -333,6 +352,106 @@ impl StorageEngine {
         
         Ok(matching_metrics)
     }
+    
+    /// Get metrics by resource type
+    pub fn get_metrics_by_resource_type(&self, resource_type: &str) -> Result<Vec<String>, StorageError> {
+        println!("StorageEngine: finding metrics for resource type: {}", resource_type);
+        let chunks = self.chunks.read().unwrap();
+        let mut matching_metrics = Vec::new();
+        
+        for chunk in chunks.values() {
+            if let Some(metrics) = chunk.resource_metrics.get(resource_type) {
+                for metric in metrics {
+                    if !matching_metrics.contains(metric) {
+                        matching_metrics.push(metric.clone());
+                    }
+                }
+            }
+        }
+        
+        Ok(matching_metrics)
+    }
+    
+    /// Query records by resource type and time range
+    pub fn query_by_resource_type(&self, resource_type: &str, start: i64, end: i64) 
+        -> Result<Vec<Record>, StorageError> 
+    {
+        println!("StorageEngine: querying records for resource type: {}", resource_type);
+        
+        // First get all metrics for this resource type
+        let mut metrics = self.get_metrics_by_resource_type(resource_type).unwrap_or_default();
+        
+        // If no metrics in the index, fall back to checking all metrics
+        if metrics.is_empty() {
+            println!("No metrics found in resource_metrics index, checking all metrics");
+            let chunks = self.chunks.read().unwrap();
+            for chunk in chunks.values() {
+                for (metric, records) in &chunk.records {
+                    // Check a sample record to see if it has the right resource_type
+                    if let Some(record) = records.first() {
+                        if record.resource_type == resource_type {
+                            metrics.push(metric.clone());
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("Found {} metrics for resource type {}", metrics.len(), resource_type);
+        
+        let mut results = Vec::new();
+        
+        // Then query each metric within the time range
+        for metric in metrics {
+            let records = self.query_range(start, end, &metric)?;
+            results.extend(records);
+        }
+        
+        Ok(results)
+    }
+
+    /// Get debug metrics information
+    pub fn debug_metrics(&self) -> Result<DebugMetricsInfo, StorageError> {
+        let chunks = self.chunks.read().unwrap();
+        let mut all_metrics = Vec::new();
+        let mut resource_metrics = HashMap::new();
+        
+        // Collect metrics from all chunks
+        for chunk in chunks.values() {
+            // Get all metrics
+            for metric in chunk.records.keys() {
+                if !all_metrics.contains(metric) {
+                    all_metrics.push(metric.clone());
+                }
+            }
+            
+            // Get resource metrics mapping
+            for (resource_type, metrics) in &chunk.resource_metrics {
+                let entry = resource_metrics
+                    .entry(resource_type.clone())
+                    .or_insert_with(Vec::new);
+                
+                for metric in metrics {
+                    if !entry.contains(metric) {
+                        entry.push(metric.clone());
+                    }
+                }
+            }
+        }
+        
+        // Basic storage info
+        let storage_info = format!("Chunks: {}, Metrics: {}, Resource types: {}",
+            chunks.len(),
+            all_metrics.len(),
+            resource_metrics.len()
+        );
+        
+        Ok(DebugMetricsInfo {
+            metrics: all_metrics,
+            resource_metrics,
+            storage_info,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +487,7 @@ mod tests {
             metric_name: "test".to_string(),
             value: 42.0,
             context: HashMap::new(),
+            resource_type: "Observation".to_string(),
         };
 
         assert!(storage.insert(record.clone()).is_ok());

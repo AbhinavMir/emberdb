@@ -28,6 +28,7 @@ impl FHIRConverter for FHIRObservation {
                     metric_name: format!("{}|{}|{}", patient_id, code, unit),
                     value: *value,
                     context,
+                    resource_type: "Observation".to_string(),
                 }]
             },
             
@@ -46,6 +47,7 @@ impl FHIRConverter for FHIRObservation {
                         metric_name: format!("{}|{}|{}|{}", patient_id, code, component.code, component.unit),
                         value: component.value,
                         context: context.clone(),
+                        resource_type: "Observation".to_string(),
                     });
                 }
                 
@@ -75,6 +77,7 @@ impl FHIRConverter for FHIRObservation {
                         metric_name: format!("{}|{}|sampled", patient_id, code),
                         value: *value * *factor, // Apply scaling factor
                         context: context.clone(),
+                        resource_type: "Observation".to_string(),
                     });
                 }
                 

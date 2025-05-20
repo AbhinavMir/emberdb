@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use super::Record;
 use std::path::Path;
@@ -57,6 +57,7 @@ pub struct TimeChunk {
     pub start_time: i64,
     pub end_time: i64,
     pub records: HashMap<String, Vec<Record>>,
+    pub resource_metrics: HashMap<String, HashSet<String>>, // Resource type -> set of metrics
     pub metadata: ChunkMetadata,
     pub compression_state: CompressionState,
     #[serde(skip)]
@@ -74,6 +75,7 @@ impl TimeChunk {
             start_time,
             end_time,
             records: HashMap::new(),
+            resource_metrics: HashMap::new(),
             metadata: ChunkMetadata {
                 created_at: now,
                 last_access: now,
@@ -91,10 +93,21 @@ impl TimeChunk {
             return Err(ChunkError::OutOfTimeRange("Record timestamp outside chunk range".to_string()));
         }
 
+        // Store the metric name before borrowing record
+        let metric_name = record.metric_name.clone();
+        let resource_type = record.resource_type.clone();
+        
+        // Add to main records index
         self.records
-            .entry(record.metric_name.clone())
+            .entry(metric_name.clone())
             .or_insert_with(Vec::new)
             .push(record);
+
+        // Add to resource type index
+        self.resource_metrics
+            .entry(resource_type)
+            .or_insert_with(HashSet::new)
+            .insert(metric_name);
 
         self.metadata.record_count += 1;
         self.update_access_time();
@@ -246,6 +259,14 @@ impl TimeChunk {
     pub fn calculate_compression_ratio(&self) -> f64 {
         // Simple implementation for now
         1.0
+    }
+
+    // Get all metrics for a specific resource type
+    pub fn get_metrics_by_resource_type(&self, resource_type: &str) -> Vec<String> {
+        self.resource_metrics
+            .get(resource_type)
+            .map(|metrics| metrics.iter().cloned().collect())
+            .unwrap_or_else(Vec::new)
     }
 }
 

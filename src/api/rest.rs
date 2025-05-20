@@ -86,6 +86,8 @@ impl RestApi {
         self.get_observation()
             .or(self.post_observation())
             .or(self.get_patient())
+            .or(self.get_resource_by_type())
+            .or(self.debug_metrics())
     }
 
     fn get_observation(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
@@ -274,6 +276,71 @@ impl RestApi {
                     data: None,
                 };
                 warp::reply::json(&response)
+            })
+    }
+
+    // New method to query resources by type
+    fn get_resource_by_type(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("fhir" / "resources" / String)
+            .and(warp::get())
+            .and(warp::query::<std::collections::HashMap<String, String>>())
+            .and_then(move |resource_type: String, params: std::collections::HashMap<String, String>| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Get time range from query params, with defaults
+                    let now = chrono::Utc::now().timestamp();
+                    let start_time = params.get("_since")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0); // Default to all records (timestamp 0)
+                    
+                    let end_time = params.get("_until")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(now);
+                    
+                    // Query by resource type
+                    match query_engine.query_by_resource_type(&resource_type, start_time, end_time) {
+                        Ok(records) => {
+                            let response = ApiResponse {
+                                status: "success".to_string(),
+                                message: format!("Found {} records for {}", records.len(), resource_type),
+                                data: Some(serde_json::to_value(records).unwrap()),
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        },
+                        Err(_) => {
+                            let response = ApiResponse {
+                                status: "error".to_string(),
+                                message: format!("No records found for {}", resource_type),
+                                data: None,
+                            };
+                            Ok::<Json, Infallible>(warp::reply::json(&response))
+                        }
+                    }
+                }
+            })
+    }
+
+    // Debug endpoint to see all metrics and resource types
+    fn debug_metrics(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("debug" / "metrics")
+            .and(warp::get())
+            .and_then(move || {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Get internal data about metrics and resources
+                    let debug_info = query_engine.debug_metrics().unwrap_or_default();
+                    
+                    let response = ApiResponse {
+                        status: "success".to_string(),
+                        message: "Debug metrics info".to_string(),
+                        data: Some(serde_json::to_value(debug_info).unwrap()),
+                    };
+                    Ok::<Json, Infallible>(warp::reply::json(&response))
+                }
             })
     }
 }
