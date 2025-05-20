@@ -121,6 +121,54 @@ impl PersistenceManager {
         Ok(())
     }
     
+    /// Append multiple records to the WAL in a batch for better performance
+    pub fn append_records(&self, records: &[Record]) -> Result<(), StorageError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        
+        // Special case: we can skip disk operations if running in memory mode
+        if self.base_path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        
+        // Fast path: If many records, use a more efficient batch approach
+        if records.len() > 100 {
+            let mut all_data = Vec::with_capacity(records.len() * 100); // Rough estimate
+            
+            // Pre-serialize everything
+            for record in records {
+                let serialized = serde_json::to_vec(record)
+                    .map_err(|e| StorageError::PersistenceError(format!("Serialization failed: {}", e)))?;
+                
+                // Store the record size as a 4-byte header
+                let record_size = serialized.len() as u32;
+                all_data.extend_from_slice(&record_size.to_be_bytes());
+                all_data.extend_from_slice(&serialized);
+            }
+            
+            // Write everything in one operation
+            let wal_path = self.get_wal_path();
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&wal_path)
+                .map_err(|e| StorageError::PersistenceError(format!("Failed to open WAL: {}", e)))?;
+                
+            file.write_all(&all_data)
+                .map_err(|e| StorageError::PersistenceError(format!("Failed to write to WAL: {}", e)))?;
+                
+            return Ok(());
+        }
+        
+        // Slower path for fewer records: use existing approach
+        for record in records {
+            self.append_record(record)?;
+        }
+        
+        Ok(())
+    }
+    
     /// Replay WAL to recover data after a crash
     pub fn replay_wal(&self) -> Result<Vec<Record>, StorageError> {
         self.wal.replay()
@@ -195,6 +243,11 @@ impl PersistenceManager {
     // Helper method to get the path for a chunk file
     fn get_chunk_path(&self, chunk_id: i64) -> PathBuf {
         self.base_path.join("chunks").join(format!("{}.chunk", chunk_id))
+    }
+
+    // Helper method to get the path for the WAL file
+    fn get_wal_path(&self) -> PathBuf {
+        self.base_path.join("wal").join("records.wal")
     }
 }
 

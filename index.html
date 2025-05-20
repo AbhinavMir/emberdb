@@ -19,7 +19,7 @@
             margin-bottom: 20px;
         }
         .container {
-            max-width: 1000px;
+            max-width: 1200px;
             margin: 0 auto;
             background-color: white;
             padding: 25px;
@@ -106,6 +106,10 @@
             margin-top: 30px;
             color: #455a64;
             font-size: 20px;
+            background-color: #f5f7fa;
+            padding: 10px 15px;
+            border-radius: 4px;
+            border-left: 5px solid #4a90e2;
         }
         .date-display {
             white-space: nowrap;
@@ -152,6 +156,21 @@
             color: #666;
             margin-left: auto;
         }
+        .resource-section {
+            margin-bottom: 40px;
+            border: 1px solid #eaeaea;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .resource-count {
+            font-weight: normal;
+            font-size: 16px;
+            margin-left: 10px;
+            padding: 2px 8px;
+            background-color: #e1f5fe;
+            border-radius: 4px;
+            color: #0277bd;
+        }
     </style>
 </head>
 <body>
@@ -160,13 +179,7 @@
         
         <div class="control-panel">
             <div class="control-group">
-                <select id="resource-type" onchange="changeResourceType()">
-                    <option value="Observation">Observation</option>
-                    <option value="MedicationAdministration">Medication Administration</option>
-                    <option value="DeviceObservation">Device Observation</option>
-                    <option value="VitalSigns">Vital Signs</option>
-                </select>
-                <button onclick="refreshData()">Refresh Data</button>
+                <button onclick="refreshAllData()">Refresh All Data</button>
             </div>
             
             <div class="control-group">
@@ -186,10 +199,37 @@
         
         <div id="status-container"></div>
         
-        <div id="observations-table-container">
-            <div class="loading">Loading data from EmberDB FHIR server...</div>
+        <!-- Observation Section -->
+        <div class="resource-section">
+            <h2>Observations <span id="observation-count" class="resource-count">0</span></h2>
+            <div id="observations-container">
+                <div class="loading">Loading Observation data...</div>
+            </div>
         </div>
         
+        <!-- Medication Administration Section -->
+        <div class="resource-section">
+            <h2>Medication Administrations <span id="medication-count" class="resource-count">0</span></h2>
+            <div id="medications-container">
+                <div class="loading">Loading Medication data...</div>
+            </div>
+        </div>
+        
+        <!-- Device Observation Section -->
+        <div class="resource-section">
+            <h2>Device Observations <span id="device-count" class="resource-count">0</span></h2>
+            <div id="devices-container">
+                <div class="loading">Loading Device data...</div>
+            </div>
+        </div>
+        
+        <!-- Vital Signs Section -->
+        <div class="resource-section">
+            <h2>Vital Signs <span id="vitalsigns-count" class="resource-count">0</span></h2>
+            <div id="vitalsigns-container">
+                <div class="loading">Loading Vital Signs data...</div>
+            </div>
+        </div>
 
         <script>
             // LOINC code dictionary for known codes
@@ -259,7 +299,7 @@
                 
                 refreshTimer = setInterval(() => {
                     console.log(`Auto-refreshing data (every ${refreshInterval/1000}s)`);
-                    refreshData();
+                    refreshAllData();
                 }, refreshInterval);
             }
             
@@ -290,85 +330,90 @@
                 }
             }
             
-            // Function to fetch FHIR observation data
-            async function fetchObservations() {
+            // Function to fetch all types of data
+            async function refreshAllData() {
                 try {
-                    // Get the selected resource type
-                    const resourceType = document.getElementById('resource-type')?.value || 'Observation';
+                    // Show loading state
+                    document.getElementById('status-container').innerHTML = `
+                        <div class="status-box">
+                            <strong>Status:</strong> Loading data from EmberDB...
+                        </div>
+                    `;
                     
-                    const response = await fetch(`http://localhost:5432/fhir/resources/${resourceType}`);
-                    const data = await response.json();
-                    // Display status information
-                    const statusContainer = document.getElementById('status-container');
-                    if (data.status === 'success') {
-                        statusContainer.innerHTML = `
-                            <div class="status-box">
-                                <strong>Status:</strong> ${data.status}<br>
-                                <strong>Message:</strong> ${data.message}
-                            </div>
-                        `;
-                    } else {
-                        statusContainer.innerHTML = `
-                            <div class="error-box">
-                                <strong>Status:</strong> ${data.status}<br>
-                                <strong>Message:</strong> ${data.message || 'Unknown error'}
-                            </div>
-                        `;
-                    }
+                    // Fetch all resource types in parallel
+                    await Promise.all([
+                        fetchResourceData('Observation', 'observations-container', 'observation-count'),
+                        fetchResourceData('MedicationAdministration', 'medications-container', 'medication-count'),
+                        fetchResourceData('DeviceObservation', 'devices-container', 'device-count'),
+                        fetchResourceData('VitalSigns', 'vitalsigns-container', 'vitalsigns-count')
+                    ]);
                     
-                    // Create the observations table
-                    const tableContainer = document.getElementById('observations-table-container');
+                    // Update status
+                    document.getElementById('status-container').innerHTML = `
+                        <div class="status-box">
+                            <strong>Status:</strong> All data loaded successfully
+                        </div>
+                    `;
                     
-                    if (data.data && data.data.length > 0) {
-                        // Render table based on resource type
-                        if (resourceType === 'Observation') {
-                            renderObservationTable(data.data, tableContainer);
-                        } else if (resourceType === 'MedicationAdministration') {
-                            renderMedicationTable(data.data, tableContainer);
-                        } else if (resourceType === 'DeviceObservation') {
-                            renderDeviceTable(data.data, tableContainer);
-                        } else if (resourceType === 'VitalSigns') {
-                            renderVitalSignsTable(data.data, tableContainer);
-                        } else {
-                            renderGenericTable(data.data, tableContainer);
-                        }
-                    } else {
-                        tableContainer.innerHTML = `<p>No ${resourceType} data found.</p>`;
-                    }
-                    
-                    // Update last refresh information
+                    // Update refresh info
                     const now = new Date();
                     document.getElementById('last-refreshed').textContent = `Last updated: ${now.toLocaleTimeString()}`;
-
-                    // Update auto-refresh status visibility
                     document.getElementById('auto-refresh-status').style.display = autoRefreshEnabled ? 'inline' : 'none';
                     
                 } catch (error) {
-                    console.error('Error fetching FHIR data:', error);
+                    console.error('Error refreshing data:', error);
                     document.getElementById('status-container').innerHTML = `
                         <div class="error-box">
                             <strong>Error:</strong> Failed to fetch data from FHIR server.<br>
                             <strong>Details:</strong> ${error.message}
                         </div>
                     `;
-                    document.getElementById('observations-table-container').innerHTML = 
-                        '<p>Could not load observation data. Please check the console for details.</p>';
-                    document.getElementById('raw-json').textContent = 'Failed to load data.';
                 }
             }
             
-            // Function to change resource type
-            function changeResourceType() {
-                refreshData();
-            }
-            
-            // Function to refresh data
-            function refreshData() {
-                fetchObservations();
+            // Function to fetch a specific resource type
+            async function fetchResourceData(resourceType, containerId, countId) {
+                try {
+                    const response = await fetch(`http://localhost:5432/fhir/resources/${resourceType}`);
+                    const data = await response.json();
+                    const container = document.getElementById(containerId);
+                    
+                    if (data.status === 'success' && data.data && data.data.length > 0) {
+                        // Render appropriate table based on resource type
+                        switch(resourceType) {
+                            case 'Observation':
+                                renderObservationTable(data.data, container);
+                                break;
+                            case 'MedicationAdministration':
+                                renderMedicationTable(data.data, container);
+                                break;
+                            case 'DeviceObservation':
+                                renderDeviceTable(data.data, container);
+                                break;
+                            case 'VitalSigns':
+                                renderVitalSignsTable(data.data, container);
+                                break;
+                            default:
+                                renderGenericTable(data.data, container);
+                        }
+                        
+                        // Update the count
+                        document.getElementById(countId).textContent = data.data.length;
+                        
+                    } else {
+                        container.innerHTML = `<p>No ${resourceType} data found.</p>`;
+                        document.getElementById(countId).textContent = '0';
+                    }
+                    
+                } catch (error) {
+                    console.error(`Error fetching ${resourceType} data:`, error);
+                    document.getElementById(containerId).innerHTML = 
+                        `<p>Could not load ${resourceType} data. Error: ${error.message}</p>`;
+                }
             }
             
             // Fetch data when the page loads
-            document.addEventListener('DOMContentLoaded', fetchObservations);
+            document.addEventListener('DOMContentLoaded', refreshAllData);
 
             // Function to render Observation table
             function renderObservationTable(data, container) {

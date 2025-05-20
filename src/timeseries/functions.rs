@@ -249,7 +249,7 @@ impl TimeSeriesFunctions {
         // Find outliers based on Z-score
         let mut outliers = Vec::new();
         
-        for (i, record) in records.iter().enumerate() {
+        for (_i, record) in records.iter().enumerate() {
             let z_score = if stddev > 0.0 { (record.value - mean) / stddev } else { 0.0 };
             let abs_z_score = z_score.abs();
             

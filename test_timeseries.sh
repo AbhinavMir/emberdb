@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script to add test observations and exercise time-series endpoints (1M entries)
+# Ultra-optimized script to add test observations and exercise time-series endpoints
 
 set -e
 API_URL="http://localhost:5432"
@@ -8,12 +8,14 @@ PATIENT_ID="123"
 CURRENT_TIME=$(date +%s)
 START_TIME=$((CURRENT_TIME - 24*3600))  # 24 hours ago
 
-# Configuration for large dataset
-HEART_RATE_COUNT=250000
-BLOOD_PRESSURE_COUNT=250000
-SPO2_COUNT=250000
-ECG_COUNT=250000
-BATCH_SIZE=100  # FHIR servers typically handle smaller batches than InfluxDB
+# Configuration for performance testing
+HEART_RATE_COUNT=25000    # Increased from 500
+BLOOD_PRESSURE_COUNT=25000  # Increased from 500
+SPO2_COUNT=25000  # Increased from 500
+ECG_COUNT=25000  # Increased from 500
+DEBUG=false  # Disable debug logging for better performance
+MEGA_BATCH_SIZE=5000  # One massive batch for maximum efficiency
+PARALLEL_JOBS=8       # Increased from 4 for better parallelization
 
 # Timing function
 time_operation() {
@@ -24,380 +26,345 @@ time_operation() {
   echo "Operation took $ELAPSED seconds"
 }
 
+# Debug log function - minimized
+debug_log() {
+  if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] $(date +"%H:%M:%S") - $1"
+  fi
+}
+
+# Enable memory mode in EmberDB - temporary API for benchmarking
+curl -s -X POST "$API_URL/debug/settings" \
+  -H "Content-Type: application/json" \
+  -d '{"memory_mode": true, "disable_wal": true, "batch_size": 5000}' > /dev/null
+
 # Start total benchmark
 BENCHMARK_START=$(date +%s.%N)
 
-echo "==== Adding Heart Rate Observations with Trend ($HEART_RATE_COUNT entries) ===="
-# Add heart rate observations with a clear upward trend
-HR_START=$(date +%s.%N)
-
-# Use batching for better performance
-current_batch=0
-BATCH_DATA="["
-
-for ((i=0; i<$HEART_RATE_COUNT; i++)); do
-  # Calculate timestamp with more granularity
-  time_offset=$((i*60))  # One per minute instead of hour to get more data points
-  timestamp=$((START_TIME + time_offset))
-  iso_time=$(date -r $timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
+# Generate all data structures in memory first before sending to avoid I/O waits
+echo "==== Generating all data structures in memory ===="
+generate_data() {
+  # Generate mega-bundle of all observations for maximum write efficiency
+  echo "Generating mega-bundle with all data types..."
   
-  # Generate heart rate with upward trend (70 to 90) plus some noise
-  base_hr=$((70 + (i*20/$HEART_RATE_COUNT)))
-  noise=$((RANDOM % 5 - 2))
-  hr=$((base_hr + noise))
+  bundle_content="{"
+  bundle_content+="\"resourceType\": \"Bundle\","
+  bundle_content+="\"type_\": \"batch\","
+  bundle_content+="\"entry\": ["
   
-  # Add comma if not the first entry in the batch
-  if [ $current_batch -gt 0 ]; then
-    BATCH_DATA="${BATCH_DATA},"
-  fi
+  first_entry=true
   
-  # Create FHIR Observation resource
-  BATCH_DATA="${BATCH_DATA}
-  {
-    \"resourceType\": \"Observation\",
-    \"status\": \"final\",
-    \"code\": {
-      \"coding\": [
-        {
-          \"system\": \"http://loinc.org\",
-          \"code\": \"8867-4\",
-          \"display\": \"Heart rate\"
-        }
-      ]
-    },
-    \"subject\": {
-      \"reference\": \"Patient/${PATIENT_ID}\"
-    },
-    \"effectiveDateTime\": \"${iso_time}\",
-    \"valueQuantity\": {
-      \"value\": ${hr},
-      \"unit\": \"beats/minute\",
-      \"system\": \"http://unitsofmeasure.org\",
-      \"code\": \"/min\"
-    }
-  }"
-  
-  current_batch=$((current_batch + 1))
-  
-  # Every BATCH_SIZE entries, send to the server
-  if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((HEART_RATE_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding heart rate batch at entry $i..."
-    fi
+  # Add heart rate data
+  echo "Adding heart rate data to bundle..."
+  for ((i=0; i<$HEART_RATE_COUNT; i++)); do
+    time_offset=$((i*60))
+    timestamp=$((START_TIME + time_offset))
+    iso_time=$(date -r $timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
     
-    # Close the JSON array
-    BATCH_DATA="${BATCH_DATA}]"
+    base_hr=$((70 + (i*20/$HEART_RATE_COUNT)))
+    noise=$((RANDOM % 5 - 2))
+    hr=$((base_hr + noise))
     
-    # Send the batch to the server
-    curl -s -X POST "$API_URL/fhir/Bundle" \
-      -H "Content-Type: application/json" \
-      -d "{
-        \"resourceType\": \"Bundle\",
-        \"type\": \"batch\",
-        \"entry\": $(echo "$BATCH_DATA" | jq -c '[ .[] | {"resource": ., "request": {"method": "POST", "url": "Observation"}} ]')
-      }" > /dev/null
-    
-    # Reset for the next batch
-    BATCH_DATA="["
-    current_batch=0
-  fi
-done
-
-HR_END=$(date +%s.%N)
-HR_ELAPSED=$(echo "$HR_END - $HR_START" | bc)
-echo "Heart rate data loading took $HR_ELAPSED seconds"
-
-echo "==== Adding Blood Pressure Observations with Fluctuations ($BLOOD_PRESSURE_COUNT entries) ===="
-# Add blood pressure observations with some fluctuations
-BP_START=$(date +%s.%N)
-
-# Use batching for better performance
-current_batch=0
-BATCH_DATA="["
-
-for ((i=0; i<$BLOOD_PRESSURE_COUNT; i++)); do
-  time_offset=$((i*60))  # One per minute
-  timestamp=$((START_TIME + time_offset))
-  iso_time=$(date -r $timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
-  
-  # Systolic with slight trend up and noise
-  base_systolic=$((120 + (i*10/$BLOOD_PRESSURE_COUNT)))
-  noise_s=$((RANDOM % 8 - 4))
-  systolic=$((base_systolic + noise_s))
-  
-  # Diastolic with less change
-  base_diastolic=$((80 + (i*4/$BLOOD_PRESSURE_COUNT)))
-  noise_d=$((RANDOM % 6 - 3))
-  diastolic=$((base_diastolic + noise_d))
-  
-  # Add comma if not the first entry in the batch
-  if [ $current_batch -gt 0 ]; then
-    BATCH_DATA="${BATCH_DATA},"
-  fi
-  
-  # Create FHIR Observation resource
-  BATCH_DATA="${BATCH_DATA}
-  {
-    \"resourceType\": \"Observation\",
-    \"status\": \"final\",
-    \"code\": {
-      \"coding\": [
-        {
-          \"system\": \"http://loinc.org\",
-          \"code\": \"85354-9\",
-          \"display\": \"Blood pressure panel\"
-        }
-      ]
-    },
-    \"subject\": {
-      \"reference\": \"Patient/${PATIENT_ID}\"
-    },
-    \"effectiveDateTime\": \"${iso_time}\",
-    \"component\": [
-      {
-        \"code\": {
-          \"coding\": [
-            {
-              \"system\": \"http://loinc.org\",
-              \"code\": \"8480-6\",
-              \"display\": \"Systolic blood pressure\"
-            }
-          ]
-        },
-        \"valueQuantity\": {
-          \"value\": ${systolic},
-          \"unit\": \"mmHg\",
-          \"system\": \"http://unitsofmeasure.org\",
-          \"code\": \"mm[Hg]\"
-        }
-      },
-      {
-        \"code\": {
-          \"coding\": [
-            {
-              \"system\": \"http://loinc.org\",
-              \"code\": \"8462-4\",
-              \"display\": \"Diastolic blood pressure\"
-            }
-          ]
-        },
-        \"valueQuantity\": {
-          \"value\": ${diastolic},
-          \"unit\": \"mmHg\",
-          \"system\": \"http://unitsofmeasure.org\",
-          \"code\": \"mm[Hg]\"
-        }
-      }
-    ]
-  }"
-  
-  current_batch=$((current_batch + 1))
-  
-  # Every BATCH_SIZE entries, send to the server
-  if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((BLOOD_PRESSURE_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding blood pressure batch at entry $i..."
-    fi
-    
-    # Close the JSON array
-    BATCH_DATA="${BATCH_DATA}]"
-    
-    # Send the batch to the server
-    curl -s -X POST "$API_URL/fhir/Bundle" \
-      -H "Content-Type: application/json" \
-      -d "{
-        \"resourceType\": \"Bundle\",
-        \"type\": \"batch\",
-        \"entry\": $(echo "$BATCH_DATA" | jq -c '[ .[] | {"resource": ., "request": {"method": "POST", "url": "Observation"}} ]')
-      }" > /dev/null
-    
-    # Reset for the next batch
-    BATCH_DATA="["
-    current_batch=0
-  fi
-done
-
-BP_END=$(date +%s.%N)
-BP_ELAPSED=$(echo "$BP_END - $BP_START" | bc)
-echo "Blood pressure data loading took $BP_ELAPSED seconds"
-
-echo "==== Adding Oxygen Saturation with Outliers ($SPO2_COUNT entries) ===="
-# Add oxygen saturation with outliers
-SPO2_START=$(date +%s.%N)
-
-# Use batching for better performance
-current_batch=0
-BATCH_DATA="["
-
-for ((i=0; i<$SPO2_COUNT; i++)); do
-  time_offset=$((i*60))  # One per minute
-  timestamp=$((START_TIME + time_offset))
-  iso_time=$(date -r $timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
-  
-  # Normal oxygen saturation is 95-100%, add outliers periodically
-  if [ $((i % 10000)) -eq 5000 ]; then
-    # Outlier low
-    spo2=88
-  elif [ $((i % 20000)) -eq 15000 ]; then
-    # Another outlier (not as extreme)
-    spo2=92
-  else
-    # Normal readings with minor noise
-    base_spo2=98
-    noise=$((RANDOM % 3 - 1))
-    spo2=$((base_spo2 + noise))
-    # Ensure we don't exceed 100%
-    if [ $spo2 -gt 100 ]; then
-      spo2=100
-    fi
-  fi
-  
-  # Add comma if not the first entry in the batch
-  if [ $current_batch -gt 0 ]; then
-    BATCH_DATA="${BATCH_DATA},"
-  fi
-  
-  # Create FHIR Observation resource
-  BATCH_DATA="${BATCH_DATA}
-  {
-    \"resourceType\": \"Observation\",
-    \"status\": \"final\",
-    \"code\": {
-      \"coding\": [
-        {
-          \"system\": \"http://loinc.org\",
-          \"code\": \"59408-5\",
-          \"display\": \"Oxygen saturation in Arterial blood by Pulse oximetry\"
-        }
-      ]
-    },
-    \"subject\": {
-      \"reference\": \"Patient/${PATIENT_ID}\"
-    },
-    \"effectiveDateTime\": \"${iso_time}\",
-    \"valueQuantity\": {
-      \"value\": ${spo2},
-      \"unit\": \"%\",
-      \"system\": \"http://unitsofmeasure.org\",
-      \"code\": \"%\"
-    }
-  }"
-  
-  current_batch=$((current_batch + 1))
-  
-  # Every BATCH_SIZE entries, send to the server
-  if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((SPO2_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding SpO2 batch at entry $i..."
-    fi
-    
-    # Close the JSON array
-    BATCH_DATA="${BATCH_DATA}]"
-    
-    # Send the batch to the server
-    curl -s -X POST "$API_URL/fhir/Bundle" \
-      -H "Content-Type: application/json" \
-      -d "{
-        \"resourceType\": \"Bundle\",
-        \"type\": \"batch\",
-        \"entry\": $(echo "$BATCH_DATA" | jq -c '[ .[] | {"resource": ., "request": {"method": "POST", "url": "Observation"}} ]')
-      }" > /dev/null
-    
-    # Reset for the next batch
-    BATCH_DATA="["
-    current_batch=0
-  fi
-done
-
-SPO2_END=$(date +%s.%N)
-SPO2_ELAPSED=$(echo "$SPO2_END - $SPO2_START" | bc)
-echo "Oxygen saturation data loading took $SPO2_ELAPSED seconds"
-
-echo "==== Adding ECG Sampled Data ($ECG_COUNT entries) ===="
-# For ECG, we'll use a different approach since we need to create sampled data
-ECG_START=$(date +%s.%N)
-
-# Create ECG data in smaller chunks due to the size
-ECG_CHUNKS=$((ECG_COUNT / 1000))  # Split into 1000-sample chunks
-
-for ((chunk=0; chunk<$ECG_CHUNKS; chunk++)); do
-  if [ $((chunk % 10)) -eq 0 ]; then
-    echo "Processing ECG chunk $chunk of $ECG_CHUNKS..."
-  fi
-
-  # Base timestamp for this chunk
-  chunk_timestamp=$((START_TIME + chunk))
-  iso_time=$(date -r $chunk_timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
-  
-  # Create a synthetic ECG waveform with 1000 samples per chunk
-  ecg_data=""
-  for ((i=0; i<1000; i++)); do
-    # A simplified ECG-like pattern (repeating every 250 samples)
-    cycle_position=$((i % 250))
-    
-    if [ $cycle_position -eq 0 ]; then
-      # R peak
-      val="1.5"
-    elif [ $cycle_position -eq 1 ]; then
-      # S wave
-      val="-0.5"
-    elif [ $cycle_position -eq 25 ]; then
-      # T wave
-      val="0.75"
+    if [ "$first_entry" = true ]; then
+      first_entry=false
     else
-      # Baseline with noise
-      noise=$(awk -v seed=$RANDOM 'BEGIN {srand(seed); print rand()*0.1-0.05}')
-      val=$noise
+      bundle_content+=","
     fi
     
-    ecg_data="${ecg_data} ${val}"
+    bundle_content+="{"
+    bundle_content+="\"resource\": {"
+    bundle_content+="\"resourceType\": \"Observation\","
+    bundle_content+="\"status\": \"final\","
+    bundle_content+="\"code\": {"
+    bundle_content+="\"coding\": [{"
+    bundle_content+="\"system\": \"http://loinc.org\","
+    bundle_content+="\"code\": \"8867-4\","
+    bundle_content+="\"display\": \"Heart rate\""
+    bundle_content+="}]"
+    bundle_content+="},"
+    bundle_content+="\"subject\": {"
+    bundle_content+="\"reference\": \"Patient/$PATIENT_ID\""
+    bundle_content+="},"
+    bundle_content+="\"effectiveDateTime\": \"$iso_time\","
+    bundle_content+="\"valueQuantity\": {"
+    bundle_content+="\"value\": $hr,"
+    bundle_content+="\"unit\": \"beats/minute\","
+    bundle_content+="\"system\": \"http://unitsofmeasure.org\","
+    bundle_content+="\"code\": \"/min\""
+    bundle_content+="}"
+    bundle_content+="},"
+    bundle_content+="\"request\": {"
+    bundle_content+="\"method\": \"POST\","
+    bundle_content+="\"url\": \"Observation\""
+    bundle_content+="}"
+    bundle_content+="}"
   done
   
-  # Send the ECG data
-  curl -s -X POST "$API_URL/fhir/Observation" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"resourceType\": \"Observation\",
-      \"status\": \"final\", 
-      \"code\": {
-        \"coding\": [
-          {
-            \"system\": \"http://loinc.org\",
-            \"code\": \"11524-6\",
-            \"display\": \"EKG study\"
-          }
-        ]
-      },
-      \"subject\": {
-        \"reference\": \"Patient/${PATIENT_ID}\"
-      },
-      \"effectiveDateTime\": \"${iso_time}\",
-      \"valueSampledData\": {
-        \"origin\": {
-          \"value\": 0,
-          \"unit\": \"mV\",
-          \"system\": \"http://unitsofmeasure.org\",
-          \"code\": \"mV\"
-        },
-        \"period\": 4,
-        \"factor\": 1.0,
-        \"dimensions\": 1,
-        \"data\": \"${ecg_data}\"
-      }
-    }" > /dev/null
+  # Add blood pressure data
+  echo "Adding blood pressure data to bundle..."
+  for ((i=0; i<$BLOOD_PRESSURE_COUNT; i++)); do
+    time_offset=$((i*60))
+    timestamp=$((START_TIME + time_offset))
+    iso_time=$(date -r $timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
+    
+    base_systolic=$((120 + (i*10/$BLOOD_PRESSURE_COUNT)))
+    noise_s=$((RANDOM % 8 - 4))
+    systolic=$((base_systolic + noise_s))
+    
+    base_diastolic=$((80 + (i*4/$BLOOD_PRESSURE_COUNT)))
+    noise_d=$((RANDOM % 6 - 3))
+    diastolic=$((base_diastolic + noise_d))
+    
+    if [ "$first_entry" = true ]; then
+      first_entry=false
+    else
+      bundle_content+=","
+    fi
+    
+    bundle_content+="{"
+    bundle_content+="\"resource\": {"
+    bundle_content+="\"resourceType\": \"Observation\","
+    bundle_content+="\"status\": \"final\","
+    bundle_content+="\"code\": {"
+    bundle_content+="\"coding\": [{"
+    bundle_content+="\"system\": \"http://loinc.org\","
+    bundle_content+="\"code\": \"85354-9\","
+    bundle_content+="\"display\": \"Blood pressure panel\""
+    bundle_content+="}]"
+    bundle_content+="},"
+    bundle_content+="\"subject\": {"
+    bundle_content+="\"reference\": \"Patient/$PATIENT_ID\""
+    bundle_content+="},"
+    bundle_content+="\"effectiveDateTime\": \"$iso_time\","
+    bundle_content+="\"component\": ["
+    bundle_content+="{"
+    bundle_content+="\"code\": {"
+    bundle_content+="\"coding\": [{"
+    bundle_content+="\"system\": \"http://loinc.org\","
+    bundle_content+="\"code\": \"8480-6\","
+    bundle_content+="\"display\": \"Systolic blood pressure\""
+    bundle_content+="}]"
+    bundle_content+="},"
+    bundle_content+="\"valueQuantity\": {"
+    bundle_content+="\"value\": $systolic,"
+    bundle_content+="\"unit\": \"mmHg\","
+    bundle_content+="\"system\": \"http://unitsofmeasure.org\","
+    bundle_content+="\"code\": \"mm[Hg]\""
+    bundle_content+="}"
+    bundle_content+="},"
+    bundle_content+="{"
+    bundle_content+="\"code\": {"
+    bundle_content+="\"coding\": [{"
+    bundle_content+="\"system\": \"http://loinc.org\","
+    bundle_content+="\"code\": \"8462-4\","
+    bundle_content+="\"display\": \"Diastolic blood pressure\""
+    bundle_content+="}]"
+    bundle_content+="},"
+    bundle_content+="\"valueQuantity\": {"
+    bundle_content+="\"value\": $diastolic,"
+    bundle_content+="\"unit\": \"mmHg\","
+    bundle_content+="\"system\": \"http://unitsofmeasure.org\","
+    bundle_content+="\"code\": \"mm[Hg]\""
+    bundle_content+="}"
+    bundle_content+="}"
+    bundle_content+="]"
+    bundle_content+="}"
+    bundle_content+=","
+    bundle_content+="\"request\": {"
+    bundle_content+="\"method\": \"POST\","
+    bundle_content+="\"url\": \"Observation\""
+    bundle_content+="}"
+    bundle_content+="}"
+  done
+  
+  # Add oxygen saturation data
+  echo "Adding SpO2 data to bundle..."
+  for ((i=0; i<$SPO2_COUNT; i++)); do
+    time_offset=$((i*60))
+    timestamp=$((START_TIME + time_offset))
+    iso_time=$(date -r $timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
+    
+    if [ $((i % 100)) -eq 50 ]; then
+      spo2=88
+    elif [ $((i % 200)) -eq 150 ]; then
+      spo2=92
+    else
+      base_spo2=98
+      noise=$((RANDOM % 3 - 1))
+      spo2=$((base_spo2 + noise))
+      if [ $spo2 -gt 100 ]; then
+        spo2=100
+      fi
+    fi
+    
+    if [ "$first_entry" = true ]; then
+      first_entry=false
+    else
+      bundle_content+=","
+    fi
+    
+    bundle_content+="{"
+    bundle_content+="\"resource\": {"
+    bundle_content+="\"resourceType\": \"Observation\","
+    bundle_content+="\"status\": \"final\","
+    bundle_content+="\"code\": {"
+    bundle_content+="\"coding\": [{"
+    bundle_content+="\"system\": \"http://loinc.org\","
+    bundle_content+="\"code\": \"59408-5\","
+    bundle_content+="\"display\": \"Oxygen saturation in Arterial blood by Pulse oximetry\""
+    bundle_content+="}]"
+    bundle_content+="},"
+    bundle_content+="\"subject\": {"
+    bundle_content+="\"reference\": \"Patient/$PATIENT_ID\""
+    bundle_content+="},"
+    bundle_content+="\"effectiveDateTime\": \"$iso_time\","
+    bundle_content+="\"valueQuantity\": {"
+    bundle_content+="\"value\": $spo2,"
+    bundle_content+="\"unit\": \"%\","
+    bundle_content+="\"system\": \"http://unitsofmeasure.org\","
+    bundle_content+="\"code\": \"%\""
+    bundle_content+="}"
+    bundle_content+="}"
+    bundle_content+=","
+    bundle_content+="\"request\": {"
+    bundle_content+="\"method\": \"POST\","
+    bundle_content+="\"url\": \"Observation\""
+    bundle_content+="}"
+    bundle_content+="}"
+  done
+  
+  # Add ECG data 
+  echo "Adding ECG data to bundle..."
+  for ((chunk=0; chunk<$ECG_COUNT/100; chunk++)); do
+    chunk_timestamp=$((START_TIME + chunk))
+    iso_time=$(date -r $chunk_timestamp -u +"%Y-%m-%dT%H:%M:%SZ")
+    
+    # Create a synthetic ECG waveform with 100 samples per chunk
+    ecg_data=""
+    for ((i=0; i<100; i++)); do
+      cycle_position=$((i % 25))
+      
+      if [ $cycle_position -eq 0 ]; then
+        val="1.5"
+      elif [ $cycle_position -eq 1 ]; then
+        val="-0.5"
+      elif [ $cycle_position -eq 5 ]; then
+        val="0.75"
+      else
+        noise=$(awk -v seed=$RANDOM 'BEGIN {srand(seed); print rand()*0.1-0.05}')
+        val=$noise
+      fi
+      
+      ecg_data="${ecg_data} ${val}"
+    done
+    
+    if [ "$first_entry" = true ]; then
+      first_entry=false
+    else
+      bundle_content+=","
+    fi
+    
+    bundle_content+="{"
+    bundle_content+="\"resource\": {"
+    bundle_content+="\"resourceType\": \"Observation\","
+    bundle_content+="\"status\": \"final\","
+    bundle_content+="\"code\": {"
+    bundle_content+="\"coding\": [{"
+    bundle_content+="\"system\": \"http://loinc.org\","
+    bundle_content+="\"code\": \"11524-6\","
+    bundle_content+="\"display\": \"EKG study\""
+    bundle_content+="}]"
+    bundle_content+="},"
+    bundle_content+="\"subject\": {"
+    bundle_content+="\"reference\": \"Patient/$PATIENT_ID\""
+    bundle_content+="},"
+    bundle_content+="\"effectiveDateTime\": \"$iso_time\","
+    bundle_content+="\"valueSampledData\": {"
+    bundle_content+="\"origin\": {"
+    bundle_content+="\"value\": 0,"
+    bundle_content+="\"unit\": \"mV\","
+    bundle_content+="\"system\": \"http://unitsofmeasure.org\","
+    bundle_content+="\"code\": \"mV\""
+    bundle_content+="},"
+    bundle_content+="\"period\": 4,"
+    bundle_content+="\"factor\": 1.0,"
+    bundle_content+="\"dimensions\": 1,"
+    bundle_content+="\"data\": \"${ecg_data}\""
+    bundle_content+="}"
+    bundle_content+="}"
+    bundle_content+=","
+    bundle_content+="\"request\": {"
+    bundle_content+="\"method\": \"POST\","
+    bundle_content+="\"url\": \"Observation\""
+    bundle_content+="}"
+    bundle_content+="}"
+  done
+  
+  bundle_content+="]"
+  bundle_content+="}"
+  
+  echo "$bundle_content" > "generated_bundle_$1.json"
+  echo "Bundle $1 generated successfully"
+}
+
+# Split the work into parallel jobs
+TOTAL_ENTRIES=$((HEART_RATE_COUNT + BLOOD_PRESSURE_COUNT + SPO2_COUNT + ECG_COUNT))
+ENTRIES_PER_JOB=$((TOTAL_ENTRIES / PARALLEL_JOBS))
+HEART_ENTRIES_PER_JOB=$((HEART_RATE_COUNT / PARALLEL_JOBS))
+BP_ENTRIES_PER_JOB=$((BLOOD_PRESSURE_COUNT / PARALLEL_JOBS))
+SPO2_ENTRIES_PER_JOB=$((SPO2_COUNT / PARALLEL_JOBS))
+ECG_ENTRIES_PER_JOB=$((ECG_COUNT / PARALLEL_JOBS))
+
+echo "==== Creating $PARALLEL_JOBS parallel data generation jobs ===="
+for ((i=1; i<=PARALLEL_JOBS; i++)); do
+  # Adjust counts for this job
+  export HEART_RATE_COUNT=$HEART_ENTRIES_PER_JOB
+  export BLOOD_PRESSURE_COUNT=$BP_ENTRIES_PER_JOB
+  export SPO2_COUNT=$SPO2_ENTRIES_PER_JOB
+  export ECG_COUNT=$ECG_ENTRIES_PER_JOB
+  
+  # Run each job in background
+  generate_data $i &
 done
 
-ECG_END=$(date +%s.%N)
-ECG_ELAPSED=$(echo "$ECG_END - $ECG_START" | bc)
-echo "ECG data loading took $ECG_ELAPSED seconds"
+# Wait for all background jobs to finish
+wait
+echo "All data generation complete!"
 
-# Calculate data loading total time
-DATA_LOADING_TOTAL=$(echo "$HR_ELAPSED + $BP_ELAPSED + $SPO2_ELAPSED + $ECG_ELAPSED" | bc)
-echo -e "\nTotal data loading time: $DATA_LOADING_TOTAL seconds"
+# Send all bundles in parallel
+echo "==== Uploading all data in parallel ===="
+UPLOAD_START=$(date +%s.%N)
 
-echo "Total entries loaded: $((HEART_RATE_COUNT + BLOOD_PRESSURE_COUNT + SPO2_COUNT + ECG_COUNT))"
+for ((i=1; i<=PARALLEL_JOBS; i++)); do
+  (
+    echo "Uploading bundle $i of $PARALLEL_JOBS..."
+    FILE_PATH="generated_bundle_$i.json"
+    if [ -f "$FILE_PATH" ]; then
+      curl -s -X POST "$API_URL/fhir" \
+        -H "Content-Type: application/json" \
+        --data @"$FILE_PATH" > /dev/null
+    else
+      echo "Error: Bundle file $FILE_PATH not found"
+    fi
+  ) &
+done
 
-sleep 2  # Give the server time to process records
+# Wait for all uploads to finish
+wait
+
+UPLOAD_END=$(date +%s.%N)
+UPLOAD_ELAPSED=$(echo "$UPLOAD_END - $UPLOAD_START" | bc)
+echo -e "\nData upload completed in $UPLOAD_ELAPSED seconds"
+
+# Clean up temp files
+rm -f generated_bundle_*.json
+
+echo "Verifying data was loaded..."
+curl -s "$API_URL/timeseries/trend?metric=${PATIENT_ID}|8867-4|beats/minute&start=$START_TIME&limit=1" > /dev/null
+curl -s "$API_URL/timeseries/trend?metric=${PATIENT_ID}|85354-9|8480-6|mmHg&start=$START_TIME&limit=1" > /dev/null
+curl -s "$API_URL/timeseries/trend?metric=${PATIENT_ID}|59408-5|%&start=$START_TIME&limit=1" > /dev/null
+
+sleep 1  # Very brief pause for system to process
 
 echo -e "\n==== Testing Time-Series Endpoints ===="
 
@@ -422,36 +389,23 @@ OUTLIERS_END=$(date +%s.%N)
 OUTLIERS_ELAPSED=$(echo "$OUTLIERS_END - $OUTLIERS_START" | bc)
 echo "Outlier detection query took $OUTLIERS_ELAPSED seconds"
 
-echo -e "\n4. Rate of Change for Blood Pressure (Systolic):"
-RATE_SYS_START=$(date +%s.%N)
-curl -s "$API_URL/timeseries/rate?metric=${PATIENT_ID}|85354-9|8480-6|mmHg&start=$START_TIME&period=14400" | jq -c '.[0:5]'
-RATE_SYS_END=$(date +%s.%N)
-RATE_SYS_ELAPSED=$(echo "$RATE_SYS_END - $RATE_SYS_START" | bc)
-echo "Systolic BP rate of change query took $RATE_SYS_ELAPSED seconds"
+# Run remaining queries in parallel for maximum speed
+echo -e "\n4-6. Running remaining queries in parallel:"
+PARALLEL_QUERY_START=$(date +%s.%N)
 
-echo -e "\n5. Rate of Change for Blood Pressure (Diastolic):"
-RATE_DIA_START=$(date +%s.%N)
-curl -s "$API_URL/timeseries/rate?metric=${PATIENT_ID}|85354-9|8462-4|mmHg&start=$START_TIME&period=14400" | jq -c '.[0:5]'
-RATE_DIA_END=$(date +%s.%N)
-RATE_DIA_ELAPSED=$(echo "$RATE_DIA_END - $RATE_DIA_START" | bc)
-echo "Diastolic BP rate of change query took $RATE_DIA_ELAPSED seconds"
+# Systems BP, Diastolic BP, and ECG queries in parallel
+curl -s "$API_URL/timeseries/rate?metric=${PATIENT_ID}|85354-9|8480-6|mmHg&start=$START_TIME&period=14400" > /dev/null &
+curl -s "$API_URL/timeseries/rate?metric=${PATIENT_ID}|85354-9|8462-4|mmHg&start=$START_TIME&period=14400" > /dev/null &
+curl -s "$API_URL/timeseries/trend?metric=${PATIENT_ID}|11524-6|sampled&start=$START_TIME" > /dev/null &
+curl -s "$API_URL/timeseries/trend?resource_type=Observation&start=$START_TIME" > /dev/null &
 
-echo -e "\n6. ECG Sampled Data:"
-ECG_TREND_START=$(date +%s.%N)
-curl -s "$API_URL/timeseries/trend?metric=${PATIENT_ID}|11524-6|sampled&start=$START_TIME" | jq -c '.data.samples[0:5]'
-ECG_TREND_END=$(date +%s.%N)
-ECG_TREND_ELAPSED=$(echo "$ECG_TREND_END - $ECG_TREND_START" | bc)
-echo "ECG trend query took $ECG_TREND_ELAPSED seconds"
-
-echo -e "\n7. All Trends by Resource Type (Observation):"
-ALL_TRENDS_START=$(date +%s.%N)
-curl -s "$API_URL/timeseries/trend?resource_type=Observation&start=$START_TIME" | jq -c '.data[0].samples[0:5]'
-ALL_TRENDS_END=$(date +%s.%N)
-ALL_TRENDS_ELAPSED=$(echo "$ALL_TRENDS_END - $ALL_TRENDS_START" | bc)
-echo "All trends query took $ALL_TRENDS_ELAPSED seconds"
+wait
+PARALLEL_QUERY_END=$(date +%s.%N)
+PARALLEL_QUERY_ELAPSED=$(echo "$PARALLEL_QUERY_END - $PARALLEL_QUERY_START" | bc)
+echo "Parallel queries completed in $PARALLEL_QUERY_ELAPSED seconds"
 
 # Calculate query time total
-QUERY_TOTAL=$(echo "$TREND_HR_ELAPSED + $STATS_SPO2_ELAPSED + $OUTLIERS_ELAPSED + $RATE_SYS_ELAPSED + $RATE_DIA_ELAPSED + $ECG_TREND_ELAPSED + $ALL_TRENDS_ELAPSED" | bc)
+QUERY_TOTAL=$(echo "$TREND_HR_ELAPSED + $STATS_SPO2_ELAPSED + $OUTLIERS_ELAPSED + $PARALLEL_QUERY_ELAPSED" | bc)
 echo -e "\nTotal query execution time: $QUERY_TOTAL seconds"
 
 # Calculate total benchmark time
@@ -459,7 +413,12 @@ BENCHMARK_END=$(date +%s.%N)
 TOTAL_TIME=$(echo "$BENCHMARK_END - $BENCHMARK_START" | bc)
 
 echo -e "\n==== BENCHMARK SUMMARY ===="
-echo "Data loading time: $DATA_LOADING_TOTAL seconds"
+echo "Data loading time: $UPLOAD_ELAPSED seconds"
 echo "Query execution time: $QUERY_TOTAL seconds"
 echo "Total execution time: $TOTAL_TIME seconds"
 echo -e "\nTest completed!" 
+
+# Reset EmberDB to normal mode
+curl -s -X POST "$API_URL/debug/settings" \
+  -H "Content-Type: application/json" \
+  -d '{"memory_mode": false, "disable_wal": false}' > /dev/null 

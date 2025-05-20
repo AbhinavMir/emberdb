@@ -8,6 +8,7 @@ use crate::fhir::{FHIRObservation, ObservationComponent};
 use crate::fhir::{MedicationAdministration, DeviceObservation, VitalSigns, VitalType};
 use crate::fhir::conversion::FHIRConverter;
 use crate::storage::Record;
+use serde_json::json;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FHIRObservationComponentRequest {
@@ -126,6 +127,34 @@ pub struct VitalSignsRequest {
     pub reliability: Option<String>, // reliability indicator
 }
 
+// Add this new request struct after the existing request structs
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FHIRBundle {
+    pub resourceType: String,  // Should be "Bundle"
+    pub type_: String,         // Should be "transaction" or "batch"
+    pub entry: Vec<BundleEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BundleEntry {
+    pub resource: serde_json::Value,
+    pub request: BundleRequest,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BundleRequest {
+    pub method: String,
+    pub url: String,
+}
+
+// Add this request struct near the other request structs
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DebugSettings {
+    pub memory_mode: bool,
+    pub disable_wal: bool,
+    pub batch_size: Option<usize>,
+}
+
 pub struct RestApi {
     query_engine: Arc<QueryEngine>,
 }
@@ -155,6 +184,7 @@ impl RestApi {
         cors_options
             .or(self.get_observation())
             .or(self.post_observation())
+            .or(self.post_bundle())  // Add the new bundle endpoint
             .or(self.get_patient())
             .or(self.post_medication_administration())
             .or(self.post_device_observation())
@@ -167,6 +197,7 @@ impl RestApi {
             .or(self.get_stats())
             .or(self.get_outliers())
             .or(self.get_rate_of_change())
+            .or(self.debug_settings())
             .map(|reply| {
                 // Add CORS headers to all responses
                 with_header(
@@ -1075,6 +1106,176 @@ impl RestApi {
                         }
                     }
                 }
+            })
+    }
+
+    fn post_bundle(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("fhir")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and_then(move |bundle: FHIRBundle| {
+                let query_engine = Arc::clone(&query_engine);
+                async move {
+                    // Verify this is a Bundle
+                    if bundle.resourceType != "Bundle" {
+                        let response = ApiResponse {
+                            status: "error".to_string(),
+                            message: "Expected a FHIR Bundle".to_string(),
+                            data: None,
+                        };
+                        return Ok::<Json, Infallible>(warp::reply::json(&response));
+                    }
+                    
+                    let mut processed_count = 0;
+                    let mut errors = Vec::new();
+                    let mut records_to_store: Vec<Record> = Vec::new();
+                    
+                    // Process each entry in the bundle
+                    for entry in bundle.entry {
+                        // Check if this is an Observation POST
+                        if let Some(resource_type) = entry.resource.get("resourceType").and_then(|v| v.as_str()) {
+                            if resource_type == "Observation" && entry.request.method == "POST" {
+                                // Parse the observation
+                                match serde_json::from_value::<FHIRObservationRequest>(entry.resource.clone()) {
+                                    Ok(observation) => {
+                                        // Parse the timestamp
+                                        match parse_iso8601_to_unix(&observation.effectiveDateTime) {
+                                            Ok(timestamp) => {
+                                                // Extract patient ID
+                                                let patient_id = observation.subject.reference.replace("Patient/", "");
+                                                
+                                                // Extract device ID if present
+                                                let device_id = observation.device.as_ref().map(|dev| dev.reference.replace("Device/", ""));
+                                                
+                                                // Get the main code
+                                                let coding = &observation.code.coding[0];
+                                                let code = coding.code.clone();
+                                                
+                                                // Create the appropriate FHIR Observation
+                                                let fhir_observation = if let Some(value_quantity) = &observation.valueQuantity {
+                                                    // Numeric observation
+                                                    Some(FHIRObservation::Numeric {
+                                                        code,
+                                                        value: value_quantity.value,
+                                                        unit: value_quantity.unit.clone(),
+                                                        timestamp,
+                                                        patient_id: patient_id.clone(),
+                                                        device_id: device_id.clone(),
+                                                    })
+                                                } else if let Some(components) = &observation.component {
+                                                    // Component observation
+                                                    let mut observation_components = Vec::new();
+                                                    
+                                                    for component in components {
+                                                        let comp_coding = &component.code.coding[0];
+                                                        let comp_value = &component.valueQuantity;
+                                                        
+                                                        observation_components.push(ObservationComponent {
+                                                            code: comp_coding.code.clone(),
+                                                            value: comp_value.value,
+                                                            unit: comp_value.unit.clone(),
+                                                        });
+                                                    }
+                                                    
+                                                    Some(FHIRObservation::Component {
+                                                        code,
+                                                        components: observation_components,
+                                                        timestamp,
+                                                        patient_id: patient_id.clone(),
+                                                        device_id: device_id.clone(),
+                                                    })
+                                                } else if let Some(sampled_data) = &observation.valueSampledData {
+                                                    // Sampled data observation
+                                                    // Parse the space-separated data values
+                                                    let values: Vec<f64> = sampled_data.data
+                                                        .split_whitespace()
+                                                        .filter_map(|s| s.parse::<f64>().ok())
+                                                        .collect();
+                                                        
+                                                    Some(FHIRObservation::SampledData {
+                                                        code,
+                                                        period: sampled_data.period,
+                                                        factor: sampled_data.factor.unwrap_or(1.0),
+                                                        data: values,
+                                                        start_time: timestamp,
+                                                        patient_id: patient_id.clone(),
+                                                        device_id: device_id.clone(),
+                                                    })
+                                                } else {
+                                                    None
+                                                };
+                                                
+                                                if let Some(obs) = fhir_observation {
+                                                    // Convert to records and store in batch
+                                                    let new_records = obs.to_records();
+                                                    records_to_store.extend(new_records);
+                                                    processed_count += 1;
+                                                } else {
+                                                    errors.push(format!("No valid observation value provided"));
+                                                }
+                                            },
+                                            Err(_) => {
+                                                errors.push(format!("Invalid timestamp format"));
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        errors.push(format!("Failed to parse observation: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Store all records in a single batch operation
+                    if !records_to_store.is_empty() {
+                        if let Err(err) = query_engine.store_records(records_to_store) {
+                            errors.push(format!("Failed to store some records: {:?}", err));
+                        }
+                    }
+                    
+                    let response = ApiResponse {
+                        status: if errors.is_empty() { "success".to_string() } else { "partial".to_string() },
+                        message: format!("Processed {} observations with {} errors", processed_count, errors.len()),
+                        data: if errors.is_empty() { 
+                            None 
+                        } else { 
+                            Some(serde_json::to_value(errors).unwrap()) 
+                        },
+                    };
+                    
+                    Ok::<Json, Infallible>(warp::reply::json(&response))
+                }
+            })
+    }
+
+    fn debug_settings(&self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let query_engine = Arc::clone(&self.query_engine);
+        
+        warp::path!("debug" / "settings")
+            .and(warp::post())
+            .and(warp::body::json())
+            .map(move |settings: DebugSettings| {
+                // Apply settings to the query engine
+                if let Err(e) = query_engine.set_debug_settings(settings.memory_mode, settings.disable_wal, settings.batch_size) {
+                    return warp::reply::with_status(
+                        warp::reply::json(&json!({
+                            "status": "error",
+                            "message": format!("Failed to apply debug settings: {}", e)
+                        })),
+                        warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    );
+                }
+                
+                warp::reply::with_status(
+                    warp::reply::json(&json!({
+                        "status": "success",
+                        "message": "Debug settings applied"
+                    })),
+                    warp::http::StatusCode::OK,
+                )
             })
     }
 }

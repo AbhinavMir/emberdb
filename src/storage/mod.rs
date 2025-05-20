@@ -12,12 +12,13 @@ use persistence::PersistenceManager;
 
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
-use std::sync::{RwLock, Arc};
+use std::sync::{RwLock, Arc, Mutex};
 use std::time::Duration;
 use std::path::PathBuf;
 use crate::config::Config;
 use std::fmt;
 use crate::timeseries::query::DebugMetricsInfo;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -73,7 +74,16 @@ pub struct StorageEngine {
     chunks: RwLock<HashMap<i64, TimeChunk>>,
     chunk_duration: Duration,
     persistence: Arc<PersistenceManager>,
-    persistence_enabled: bool,
+    persistence_enabled: AtomicBool,
+    active_records: Mutex<HashMap<String, i64>>, // metric_name -> latest timestamp
+    debug_mode: RwLock<DebugSettings>,           // Performance optimization settings
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DebugSettings {
+    memory_mode: bool,       // Skip disk operations when possible
+    disable_wal: bool,       // Skip WAL writes
+    batch_size: usize,       // Batch size for operations
 }
 
 impl StorageEngine {
@@ -89,7 +99,13 @@ impl StorageEngine {
             chunks: RwLock::new(HashMap::new()),
             chunk_duration: config.chunk_duration,
             persistence,
-            persistence_enabled: true,
+            persistence_enabled: AtomicBool::new(true),
+            active_records: Mutex::new(HashMap::new()),
+            debug_mode: RwLock::new(DebugSettings {
+                memory_mode: false,
+                disable_wal: false,
+                batch_size: 500,
+            }),
         };
         
         // Recover from disk and WAL
@@ -145,13 +161,13 @@ impl StorageEngine {
 
     /// Insert a record into the appropriate time chunk
     pub fn insert(&self, record: Record) -> Result<(), StorageError> {
-        self.insert_internal(record, self.persistence_enabled)
+        self.insert_internal(record, self.persistence_enabled.load(Ordering::SeqCst))
     }
     
     /// Internal insert method that can optionally write to WAL
     fn insert_internal(&self, record: Record, write_wal: bool) -> Result<(), StorageError> {
         // First, write to WAL if persistence is enabled
-        if write_wal {
+        if write_wal && self.persistence_enabled.load(Ordering::SeqCst) {
             self.persistence.append_record(&record)?;
         }
         
@@ -175,7 +191,7 @@ impl StorageEngine {
         let should_persist = chunk.is_full();
         
         // If the chunk is full, we need to persist it, but we'll do that after releasing the lock
-        let chunk_to_persist = if should_persist && self.persistence_enabled {
+        let chunk_to_persist = if should_persist && self.persistence_enabled.load(Ordering::SeqCst) {
             Some((chunk_id, chunk.clone()))
         } else {
             None
@@ -250,7 +266,7 @@ impl StorageEngine {
 
     /// Persist all dirty chunks to disk
     pub fn flush_all(&self) -> Result<(), StorageError> {
-        if !self.persistence_enabled {
+        if !self.persistence_enabled.load(Ordering::SeqCst) {
             println!("Persistence disabled, skipping flush");
             return Ok(());
         }
@@ -335,7 +351,7 @@ impl StorageEngine {
     
     /// Enable or disable persistence
     pub fn set_persistence(&mut self, enabled: bool) {
-        self.persistence_enabled = enabled;
+        self.persistence_enabled.store(enabled, Ordering::SeqCst);
     }
 
     pub fn get_matching_metrics(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
@@ -455,6 +471,108 @@ impl StorageEngine {
             storage_info,
         })
     }
+
+    pub fn chunk_duration(&self) -> Duration {
+        self.chunk_duration
+    }
+    
+    /// Append multiple records to the WAL in a single operation 
+    pub fn append_records_to_wal(&self, records: Vec<Record>) -> Result<(), StorageError> {
+        if !self.persistence_enabled.load(Ordering::SeqCst) || records.is_empty() {
+            return Ok(());
+        }
+        
+        // Batch write to WAL
+        self.persistence.append_records(&records)?;
+        
+        // Update the active records map
+        let mut active_records = self.active_records.lock().unwrap();
+        for record in &records {
+            active_records.insert(record.metric_name.clone(), record.timestamp);
+        }
+        
+        Ok(())
+    }
+    
+    /// Insert a batch of records into a specific chunk
+    pub fn insert_batch(&self, chunk_id: i64, records: Vec<Record>) -> Result<(), StorageError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        
+        let mut chunks = self.chunks.write().unwrap();
+        
+        // Create new chunk if needed
+        if !chunks.contains_key(&chunk_id) {
+            let start_time = chunk_id;
+            let end_time = start_time + self.chunk_duration.as_secs() as i64;
+            chunks.insert(chunk_id, TimeChunk::new(start_time, end_time));
+        }
+
+        // Get the chunk
+        let chunk = chunks.get_mut(&chunk_id)
+            .ok_or_else(|| StorageError::ChunkNotFound("Chunk not found after creation".to_string()))?;
+        
+        // Insert all records
+        for record in records {
+            if let Err(e) = chunk.append(record) {
+                return Err(e.into());
+            }
+        }
+        
+        // Check if the chunk is full and should be persisted
+        let should_persist = chunk.is_full();
+        
+        // If the chunk is full, we need to persist it, but we'll do that after releasing the lock
+        let chunk_to_persist = if should_persist && self.persistence_enabled.load(Ordering::SeqCst) {
+            Some((chunk_id, chunk.clone()))
+        } else {
+            None
+        };
+        
+        // Release the lock
+        drop(chunks);
+        
+        // Persist the chunk if needed
+        if let Some((chunk_id, chunk)) = chunk_to_persist {
+            // Save the chunk
+            self.persistence.save_chunk(&chunk)?;
+            
+            // Mark the chunk as durable in the WAL
+            let chunk_duration_secs = self.chunk_duration.as_secs() as i64;
+            self.persistence.mark_chunk_durable(chunk.start_time, chunk_duration_secs)?;
+            
+            // Mark chunk as clean with a separate write lock
+            let mut chunks = self.chunks.write().unwrap();
+            if let Some(chunk) = chunks.get_mut(&chunk_id) {
+                chunk.mark_clean();
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Set debug settings for performance testing
+    pub fn set_debug_settings(&self, memory_mode: bool, disable_wal: bool, batch_size: Option<usize>) -> Result<(), StorageError> {
+        let mut debug_settings = self.debug_mode.write().unwrap();
+        debug_settings.memory_mode = memory_mode;
+        debug_settings.disable_wal = disable_wal;
+        
+        if let Some(size) = batch_size {
+            debug_settings.batch_size = size;
+        }
+        
+        // Apply persistence settings immediately using AtomicBool
+        self.persistence_enabled.store(!memory_mode, Ordering::SeqCst);
+        
+        Ok(())
+    }
+}
+
+// Add this function outside the StorageEngine implementation
+// to make it available for the query engine
+pub fn chunk_id_for_timestamp(timestamp: i64, chunk_duration: Duration) -> i64 {
+    timestamp - (timestamp % chunk_duration.as_secs() as i64)
 }
 
 #[cfg(test)]

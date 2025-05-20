@@ -1,11 +1,12 @@
 use std::sync::Arc;
-use crate::storage::{StorageEngine, Record, StorageError};
+use crate::storage::{self, StorageEngine, Record, StorageError};
 use std::time::Duration;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use crate::timeseries::functions::{
     TimeSeriesFunctions, TrendAnalysis, TimeSeriesStats, OutlierDetection
 };
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct TimeSeriesQuery {
@@ -30,6 +31,16 @@ pub enum QueryError {
     StorageError(String),
     InvalidTimeRange(String),
     MetricNotFound(String),
+}
+
+impl fmt::Display for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+            QueryError::InvalidTimeRange(msg) => write!(f, "Invalid time range: {}", msg),
+            QueryError::MetricNotFound(msg) => write!(f, "Metric not found: {}", msg),
+        }
+    }
 }
 
 impl From<StorageError> for QueryError {
@@ -69,9 +80,31 @@ impl QueryEngine {
     }
     
     pub fn store_records(&self, records: Vec<Record>) -> Result<(), QueryError> {
-        for record in records {
-            self.store_record(record)?;
+        if records.is_empty() {
+            return Ok(());
         }
+        
+        // Group records by chunk to reduce lock contention
+        let mut records_by_chunk = std::collections::HashMap::new();
+        
+        // Pre-process to group records by chunk ID
+        for record in records {
+            let chunk_id = storage::chunk_id_for_timestamp(record.timestamp, self.storage.chunk_duration());
+            records_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(record);
+        }
+        
+        // First, write everything to WAL in a single operation if possible
+        if let Err(e) = self.storage.append_records_to_wal(records_by_chunk.values().flatten().cloned().collect()) {
+            return Err(QueryError::StorageError(e.to_string()));
+        }
+        
+        // Then store records in each chunk
+        for (chunk_id, chunk_records) in records_by_chunk {
+            if let Err(e) = self.storage.insert_batch(chunk_id, chunk_records) {
+                return Err(QueryError::StorageError(e.to_string()));
+            }
+        }
+        
         Ok(())
     }
 
@@ -339,6 +372,17 @@ impl QueryEngine {
             .map_err(|e| QueryError::StorageError(e.to_string()))?;
             
         Ok(TimeSeriesFunctions::calculate_rate_of_change(&records, period_seconds))
+    }
+
+    /// Set debug settings for performance optimization
+    pub fn set_debug_settings(&self, memory_mode: bool, disable_wal: bool, batch_size: Option<usize>) -> Result<(), QueryError> {
+        // Log what we're trying to do
+        println!("Setting debug mode: memory_mode={}, disable_wal={}, batch_size={:?}", 
+                 memory_mode, disable_wal, batch_size);
+        
+        // Now we can directly call set_debug_settings on storage since it handles thread safety
+        self.storage.set_debug_settings(memory_mode, disable_wal, batch_size)
+            .map_err(|e| QueryError::StorageError(e.to_string()))
     }
 }
 

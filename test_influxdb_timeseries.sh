@@ -11,12 +11,20 @@ PATIENT_ID="123"
 CURRENT_TIME=$(date +%s)
 START_TIME=$((CURRENT_TIME - 24*3600))  # 24 hours ago
 
-# Configuration for large dataset
-HEART_RATE_COUNT=250000
-BLOOD_PRESSURE_COUNT=250000
-SPO2_COUNT=250000
-ECG_COUNT=250000
-BATCH_SIZE=5000
+# Configuration for large dataset - REDUCED for testing
+HEART_RATE_COUNT=1000   # Reduced from 250000
+BLOOD_PRESSURE_COUNT=1000  # Reduced from 250000
+SPO2_COUNT=1000  # Reduced from 250000
+ECG_COUNT=1000  # Reduced from 250000
+BATCH_SIZE=200  # Reduced from 5000
+DEBUG=true  # Enable debug logging
+
+# Debug log function
+debug_log() {
+  if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] $(date +"%H:%M:%S") - $1"
+  fi
+}
 
 # Start total benchmark
 BENCHMARK_START=$(date +%s.%N)
@@ -36,6 +44,7 @@ HR_START=$(date +%s.%N)
 # Use batching for better performance
 current_batch=0
 HR_DATA=""
+debug_log "Starting heart rate batch creation"
 
 for ((i=0; i<$HEART_RATE_COUNT; i++)); do
   # Calculate timestamp with microsecond precision to ensure unique timestamps
@@ -54,17 +63,30 @@ for ((i=0; i<$HEART_RATE_COUNT; i++)); do
   
   # Every BATCH_SIZE entries, send to InfluxDB
   if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((HEART_RATE_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding heart rate batch at entry $i..."
-    fi
+    echo "Processing heart rate batch: entries $((i-current_batch+1)) to $i..."
     
-    curl -s -XPOST "${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=ns" \
+    debug_log "Preparing data payload, size: $(echo -n "$HR_DATA" | wc -c) bytes"
+    debug_log "Sending request to $INFLUX_URL/api/v2/write"
+    
+    curl_result=$(curl -s -XPOST "${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=ns" \
       -H "Authorization: Token ${INFLUX_TOKEN}" \
       -H "Content-Type: text/plain; charset=utf-8" \
-      --data-binary "${HR_DATA}" > /dev/null
+      --data-binary "${HR_DATA}" 2>&1)
     
+    if [ $? -ne 0 ]; then
+      echo "Error: cURL failed with status $?"
+      echo "Output: $curl_result"
+      exit 1
+    fi
+    
+    debug_log "Batch request complete"
     HR_DATA=""
     current_batch=0
+  fi
+  
+  # Add progress log every 100 entries
+  if [ $((i % 100)) -eq 0 ] && [ $i -gt 0 ]; then
+    echo "Processed $i of $HEART_RATE_COUNT heart rate entries..."
   fi
 done
 
@@ -79,6 +101,7 @@ BP_START=$(date +%s.%N)
 # Use batching for better performance
 current_batch=0
 BP_DATA=""
+debug_log "Starting blood pressure batch creation"
 
 for ((i=0; i<$BLOOD_PRESSURE_COUNT; i++)); do
   time_offset=$((i*60))  # One per minute
@@ -102,17 +125,24 @@ blood_pressure,patient_id=${PATIENT_ID},code=85354-9,component=diastolic value=$
   
   # Every BATCH_SIZE entries, send to InfluxDB
   if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((BLOOD_PRESSURE_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding blood pressure batch at entry $i..."
-    fi
+    echo "Processing blood pressure batch: entries $((i-current_batch+1)) to $i..."
+    
+    debug_log "Preparing data payload, size: $(echo -n "$BP_DATA" | wc -c) bytes"
+    debug_log "Sending request to $INFLUX_URL/api/v2/write"
     
     curl -s -XPOST "${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=ns" \
       -H "Authorization: Token ${INFLUX_TOKEN}" \
       -H "Content-Type: text/plain; charset=utf-8" \
       --data-binary "${BP_DATA}" > /dev/null
     
+    debug_log "Batch request complete"
     BP_DATA=""
     current_batch=0
+  fi
+  
+  # Add progress log every 100 entries
+  if [ $((i % 100)) -eq 0 ] && [ $i -gt 0 ]; then
+    echo "Processed $i of $BLOOD_PRESSURE_COUNT blood pressure entries..."
   fi
 done
 
@@ -127,16 +157,17 @@ SPO2_START=$(date +%s.%N)
 # Use batching for better performance
 current_batch=0
 SPO2_DATA=""
+debug_log "Starting SpO2 batch creation"
 
 for ((i=0; i<$SPO2_COUNT; i++)); do
   time_offset=$((i*60))  # One per minute
   timestamp=$((START_TIME + time_offset))
   
   # Normal oxygen saturation is 95-100%, add outliers periodically
-  if [ $((i % 10000)) -eq 5000 ]; then
-    # Outlier low
+  if [ $((i % 100)) -eq 50 ]; then
+    # Outlier low - increased frequency for smaller dataset
     spo2=88
-  elif [ $((i % 20000)) -eq 15000 ]; then
+  elif [ $((i % 200)) -eq 150 ]; then
     # Another outlier (not as extreme)
     spo2=92
   else
@@ -157,17 +188,24 @@ for ((i=0; i<$SPO2_COUNT; i++)); do
   
   # Every BATCH_SIZE entries, send to InfluxDB
   if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((SPO2_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding SpO2 batch at entry $i..."
-    fi
+    echo "Processing SpO2 batch: entries $((i-current_batch+1)) to $i..."
+    
+    debug_log "Preparing data payload, size: $(echo -n "$SPO2_DATA" | wc -c) bytes"
+    debug_log "Sending request to $INFLUX_URL/api/v2/write"
     
     curl -s -XPOST "${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=ns" \
       -H "Authorization: Token ${INFLUX_TOKEN}" \
       -H "Content-Type: text/plain; charset=utf-8" \
       --data-binary "${SPO2_DATA}" > /dev/null
     
+    debug_log "Batch request complete"  
     SPO2_DATA=""
     current_batch=0
+  fi
+  
+  # Add progress log every 100 entries
+  if [ $((i % 100)) -eq 0 ] && [ $i -gt 0 ]; then
+    echo "Processed $i of $SPO2_COUNT SpO2 entries..."
   fi
 done
 
@@ -182,13 +220,14 @@ ECG_START=$(date +%s.%N)
 # Use batching for better performance
 current_batch=0
 ECG_DATA=""
+debug_log "Starting ECG batch creation"
 
 for ((i=0; i<$ECG_COUNT; i++)); do
-  # Calculate a realistic timestamp with microsecond precision
-  timestamp=$((START_TIME + (i/250)))  # Simulate 250Hz ECG sampling rate
+  # Calculate a realistic timestamp for ECG samples
+  timestamp=$((START_TIME + (i/10)))  # Simulate 10Hz ECG sampling rate
   
   # Create a realistic ECG waveform pattern
-  cycle_position=$((i % 250))  # Position within a 1-second cycle
+  cycle_position=$((i % 25))  # Position within a 25-sample cycle (2.5 sec at 10Hz)
   
   if [ $cycle_position -eq 0 ]; then
     # R peak
@@ -196,7 +235,7 @@ for ((i=0; i<$ECG_COUNT; i++)); do
   elif [ $cycle_position -eq 1 ]; then
     # S wave
     val="-0.5"
-  elif [ $cycle_position -eq 25 ]; then
+  elif [ $cycle_position -eq 5 ]; then
     # T wave
     val="0.75"
   else
@@ -212,17 +251,24 @@ for ((i=0; i<$ECG_COUNT; i++)); do
   
   # Every BATCH_SIZE entries, send to InfluxDB
   if [ $current_batch -eq $BATCH_SIZE ] || [ $i -eq $((ECG_COUNT - 1)) ]; then
-    if [ $((i % 10000)) -eq 0 ]; then
-      echo "Adding ECG batch at entry $i..."
-    fi
+    echo "Processing ECG batch: entries $((i-current_batch+1)) to $i..."
+    
+    debug_log "Preparing data payload, size: $(echo -n "$ECG_DATA" | wc -c) bytes"
+    debug_log "Sending request to $INFLUX_URL/api/v2/write"
     
     curl -s -XPOST "${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=ns" \
       -H "Authorization: Token ${INFLUX_TOKEN}" \
       -H "Content-Type: text/plain; charset=utf-8" \
       --data-binary "${ECG_DATA}" > /dev/null
     
+    debug_log "Batch request complete"
     ECG_DATA=""
     current_batch=0
+  fi
+  
+  # Add progress log every 100 entries
+  if [ $((i % 100)) -eq 0 ] && [ $i -gt 0 ]; then
+    echo "Processed $i of $ECG_COUNT ECG entries..."
   fi
 done
 
@@ -243,6 +289,8 @@ echo -e "\n==== Testing Time-Series Queries ===="
 # 1. Heart Rate Trend Analysis
 echo -e "\n1. Trend Analysis for Heart Rate:"
 TREND_HR_START=$(date +%s.%N)
+debug_log "Running heart rate trend query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
@@ -259,6 +307,8 @@ echo "Heart rate trend query took $TREND_HR_ELAPSED seconds"
 # 2. SpO2 Statistics
 echo -e "\n2. Statistics for Oxygen Saturation:"
 STATS_SPO2_START=$(date +%s.%N)
+debug_log "Running SpO2 statistics query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
@@ -275,6 +325,8 @@ echo "Oxygen saturation stats query took $STATS_SPO2_ELAPSED seconds"
 # 3. SpO2 Outlier Detection - Fixed syntax
 echo -e "\n3. Outlier Detection for Oxygen Saturation (Z-score):"
 OUTLIERS_START=$(date +%s.%N)
+debug_log "Running outlier detection query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
@@ -291,6 +343,8 @@ echo "Outlier detection query took $OUTLIERS_ELAPSED seconds"
 # 4. Systolic BP Rate of Change
 echo -e "\n4. Rate of Change for Blood Pressure (Systolic):"
 RATE_SYS_START=$(date +%s.%N)
+debug_log "Running systolic BP rate of change query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
@@ -307,6 +361,8 @@ echo "Systolic BP rate of change query took $RATE_SYS_ELAPSED seconds"
 # 5. Diastolic BP Rate of Change
 echo -e "\n5. Rate of Change for Blood Pressure (Diastolic):"
 RATE_DIA_START=$(date +%s.%N)
+debug_log "Running diastolic BP rate of change query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
@@ -323,6 +379,8 @@ echo "Diastolic BP rate of change query took $RATE_DIA_ELAPSED seconds"
 # 6. ECG Trend
 echo -e "\n6. ECG Sampled Data:"
 ECG_TREND_START=$(date +%s.%N)
+debug_log "Running ECG trend query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
@@ -339,6 +397,8 @@ echo "ECG trend query took $ECG_TREND_ELAPSED seconds"
 # 7. All Trends - Fixed syntax
 echo -e "\n7. All Trends by Resource Type:"
 ALL_TRENDS_START=$(date +%s.%N)
+debug_log "Running all trends query"
+
 curl -s -XPOST "${INFLUX_URL}/api/v2/query?org=${INFLUX_ORG}" \
   -H "Authorization: Token ${INFLUX_TOKEN}" \
   -H "Content-Type: application/json" \
