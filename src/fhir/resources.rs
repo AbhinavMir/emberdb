@@ -107,9 +107,9 @@ impl FHIRConverter for FHIRObservation {
         // Check if this is a component observation (has 4 parts)
         if parts.len() >= 4 && parts[2] != "sampled" {
             // This is a component of a multi-component observation
-            let parent_code = code;
-            let component_code = parts[2].to_string();
-            let component_unit = parts[3].to_string();
+            let parent_code = code.clone();
+            let _component_code = parts[2].to_string();
+            let _component_unit = parts[3].to_string();
             
             // Group records by timestamp to reassemble components
             let mut components_by_time = HashMap::new();

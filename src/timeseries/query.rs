@@ -154,6 +154,7 @@ impl QueryEngine {
             timestamp: first_record.timestamp,
             metric_name: first_record.metric_name.clone(),
             value,
+            context: first_record.context.clone(),
         }
     }
 }

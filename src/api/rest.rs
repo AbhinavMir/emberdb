@@ -4,7 +4,7 @@ use warp::reply::Json;
 use std::convert::Infallible;
 use serde::{Deserialize, Serialize};
 use crate::timeseries::query::QueryEngine;
-use crate::fhir::{FHIRObservation};
+use crate::fhir::{FHIRObservation, ObservationComponent};
 use crate::fhir::conversion::FHIRConverter;
 use crate::storage::Record;
 
@@ -160,7 +160,7 @@ impl RestApi {
         let patient_id = observation.subject.reference.replace("Patient/", "");
         
         // Extract device ID if present
-        let device_id = observation.device.map(|dev| dev.reference.replace("Device/", ""));
+        let device_id = observation.device.as_ref().map(|dev| dev.reference.replace("Device/", ""));
         
         // Get the main code
         let coding = &observation.code.coding[0];
@@ -259,7 +259,7 @@ impl RestApi {
             .and_then(move |observation: FHIRObservationRequest| {
                 let query_engine = Arc::clone(&query_engine);
                 async move {
-                    handle_observation_request(observation, query_engine).await
+                    Self::handle_observation_request(observation, query_engine).await
                 }
             })
     }
