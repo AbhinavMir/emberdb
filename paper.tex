@@ -26,7 +26,7 @@
 \maketitle
 
 \begin{abstract}
-ICU monitors sample vital signs every few seconds. The standard interoperability format for those readings is HL7 FHIR Observation. General-purpose time-series databases (InfluxDB, TimescaleDB) ingest the data but discard the clinical semantics at the storage layer, forcing reconstruction at query time. \textbf{EmberDB} is a Rust time-series engine for FHIR Observation data. Records carry a composite metric key of patient identifier, LOINC code, and unit. Data is partitioned into 1-hour chunks and persisted through a write-ahead log. Five clinical pattern-detection algorithms run inside the engine: CUSUM changepoint detection, PELT segmentation, seasonal decomposition, Mahalanobis anomaly scoring, and moving-window analysis. On a synthetic MIMIC-IV workload (500 patients, 48-hour ICU stays, 1.7M chart\-events) EmberDB sustains 3.2M records/sec in memory mode with sub-microsecond point queries. Against a SQLite baseline on patient-scoped workloads it is 7-9$\times$ faster on ingestion and 8{,}890$\times$ faster on point lookup.
+ICU monitors sample vital signs every few seconds. The standard interoperability format for those readings is HL7 FHIR Observation. General-purpose time-series databases such as InfluxDB and TimescaleDB ingest the data but drop the clinical semantics at the storage layer, which forces reconstruction at query time. \textbf{EmberDB} is a Rust time-series engine for FHIR Observation data. Records carry a composite metric key of patient identifier, LOINC code, and unit. Data is partitioned into 1-hour chunks and persisted through a write-ahead log. Five clinical pattern-detection algorithms run inside the engine: CUSUM changepoint detection, PELT segmentation, seasonal decomposition, Mahalanobis anomaly scoring, and moving-window analysis. On a synthetic MIMIC-IV workload of 500 patients, 48-hour ICU stays, and 1.7M chart\-events, EmberDB sustains 3.2M records/sec in memory mode with sub-microsecond point queries. Against a SQLite baseline on patient-scoped workloads it runs 7-9$\times$ faster on ingestion and 8{,}890$\times$ faster on point lookup.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -58,7 +58,7 @@ We evaluate EmberDB on synthetic MIMIC-IV chart\-events and compare it to a SQLi
 \label{sec:related}
 
 \subsection{Clinical time-series data}
-Clinical streams behave differently from IoT or infrastructure metrics in three ways that matter for storage. They are multivariate and physiologically correlated (heart rate, blood pressure, and SpO2 do not move independently). They carry semantic baggage that must be preserved end-to-end: each value has a LOINC code, a patient reference, and clinical context. And the sampling is irregular, with measurement frequency a function of patient acuity and clinical protocol rather than a fixed cadence.
+Clinical streams differ from IoT or infrastructure metrics in three ways that matter for storage. They are multivariate and physiologically correlated: heart rate, blood pressure, and SpO2 do not move independently. They carry semantic baggage that must be preserved end-to-end. Each value has a LOINC code, a patient reference, and clinical context. And the sampling is irregular, with measurement frequency a function of patient acuity and clinical protocol rather than a fixed cadence.
 
 MIMIC-IV \cite{johnson2023mimic} is the canonical reference dataset for these properties. The \texttt{chartevents} table runs to hundreds of millions of rows across thousands of ICU stays, with item IDs mapping to specific physiological measurements.
 
@@ -85,7 +85,7 @@ metric_name = "{patient_id}|{loinc_code}|{unit}"
 \end{lstlisting}
 A heart rate for patient P1234 ends up stored as \texttt{P1234|8867-4|/min}. The encoding lets the engine answer both patient-scoped and code-scoped queries by prefix matching on the key, with no secondary indexes.
 
-Multi-component observations (blood pressure being the canonical case, with systolic and diastolic) are decomposed into records sharing a prefix. The FHIR component structure is preserved, and each component can be analysed as its own time series.
+Multi-component observations (blood pressure, with systolic and diastolic, is the canonical case) are decomposed into records sharing a prefix. The FHIR component structure is preserved, and each component can be analysed as its own time series.
 
 \subsection{Time-partitioned chunks}
 Records live inside \texttt{TimeChunk} structures, each spanning a configurable duration (one hour by default).
@@ -93,10 +93,10 @@ A chunk contains a \texttt{HashMap<String, Vec<Record>{}>} mapping metric names 
 The chunk boundary for any timestamp is computed by flooring to the nearest multiple of the chunk duration, which keeps chunk identification at $O(1)$.
 
 \subsection{Write-ahead log}
-The WAL is what gives EmberDB crash recovery. Each record gets persisted before it lands in the in-memory chunk.
+The WAL gives EmberDB crash recovery. Each record is persisted before it lands in the in-memory chunk.
 Records are serialised as JSON with a 4-byte length prefix.
-A chunk that crosses 10{,}000 records or 1~MB gets flushed, and the matching WAL entries are marked durable at that point.
-On recovery the engine loads the persisted chunks from disk and replays whatever WAL entries are left.
+A chunk that crosses 10{,}000 records or 1~MB is flushed, and the matching WAL entries are marked durable at that point.
+On recovery the engine loads the persisted chunks from disk and replays whatever WAL entries remain.
 
 \subsection{MIMIC-IV data loader}
 A MIMIC-IV loader module ships with EmberDB. It maps chart\-event item IDs to FHIR LOINC codes (itemid 220045 $\rightarrow$ LOINC 8867-4 for heart rate, and so on) and turns rows into \texttt{Record} structures directly. The path is zero-copy, so there is no overhead from building intermediate FHIR JSON.
@@ -292,14 +292,14 @@ Latest vital & 27.1 & 79.7 & 2.9$\times$ \\
 
 \textbf{FHIR-native advantages.}
 By encoding patient ID and LOINC code directly into the metric key, EmberDB removes the need for secondary indexes or joins when retrieving patient-scoped observations.
-This design works well for clinical dashboard queries that retrieve all vitals for a single patient over a shift or stay.
+The design fits clinical dashboard queries that retrieve all vitals for a single patient over a shift or stay.
 
 \textbf{Pattern detection at the storage layer.}
-Embedding changepoint detection and anomaly scoring directly in the storage engine avoids data export overhead and allows real-time alerting pipelines that operate on the same data path as persistence.
+Embedding changepoint detection and anomaly scoring directly in the storage engine avoids data export overhead. Real-time alerting pipelines can operate on the same data path as persistence.
 
 \textbf{Limitations.}
 EmberDB currently serializes chunks as JSON, which has higher storage overhead than columnar formats (149.6 bytes/record vs.\ $\sim$107 bytes/record for SQLite at 100K records).
-On the full-patient-stay query in the MIMIC workload, SQLite outperforms EmberDB (617~$\mu$s vs.\ 945~$\mu$s) because EmberDB requires separate queries per vital metric while SQLite returns all vitals in a single index scan.
+On the full-patient-stay query in the MIMIC workload, SQLite outperforms EmberDB (617~$\mu$s vs.\ 945~$\mu$s) because EmberDB issues separate queries per vital metric while SQLite returns all vitals in a single index scan.
 The single-writer architecture limits concurrent write throughput.
 The pattern detection algorithms use simplified implementations; production deployment would need validated statistical libraries.
 
@@ -310,7 +310,7 @@ Planned improvements include columnar chunk encoding (e.g., Parquet), concurrent
 \section{Conclusion}
 \label{sec:conclusion}
 
-EmberDB is evidence that you do not have to choose between high ingest throughput and native clinical semantics. Encode patient identity and LOINC codes into the storage key, partition the data into time-aligned chunks, integrate the pattern-detection algorithms directly, and the result handles continuous patient monitoring without giving up time-series performance.
+EmberDB shows that high ingest throughput and native clinical semantics are not mutually exclusive. Encoding patient identity and LOINC codes into the storage key, partitioning the data into time-aligned chunks, and integrating the pattern-detection algorithms directly yields a system that handles continuous patient monitoring without giving up time-series performance.
 On synthetic MIMIC-IV workloads it is competitive with SQLite, with richer query semantics and no post-hoc data transformation.
 
 \begin{thebibliography}{10}
