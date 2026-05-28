@@ -7,6 +7,7 @@
 
 pub mod query;
 pub mod functions;
+pub mod detection;
 
 #[cfg(test)]
 mod tests {

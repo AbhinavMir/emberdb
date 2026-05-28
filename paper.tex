@@ -13,7 +13,6 @@
   basicstyle=\footnotesize\ttfamily,
   breaklines=true,
   frame=single,
-  language=Rust,
   columns=fullflexible
 }
 
@@ -32,7 +31,7 @@ General-purpose time-series databases such as InfluxDB and TimescaleDB can inges
 We present \textbf{EmberDB}, a time-series storage engine that treats FHIR Observations as first-class storage objects.
 EmberDB partitions data into one-hour time chunks, encodes metrics with a composite key of patient identifier and LOINC code, persists records through a write-ahead log (WAL), and provides built-in clinical pattern detection algorithms including CUSUM changepoint detection, PELT segmentation, seasonal decomposition, Mahalanobis anomaly scoring, and moving-window analysis.
 We evaluate EmberDB on synthetic MIMIC-IV--format chart\-events spanning 500 patients over 48-hour ICU stays.
-EmberDB achieves write throughput exceeding 3 million records per second in memory-optimized mode and sustains sub-microsecond point query latency.
+EmberDB achieves write throughput exceeding 3.2 million records per second in memory-optimized mode and sustains sub-microsecond point query latency.
 On clinical workloads, EmberDB outperforms a comparable SQLite baseline on patient-scoped queries while providing native FHIR semantics without post-hoc mapping.
 \end{abstract}
 
@@ -178,7 +177,11 @@ Table~\ref{tab:write} shows write throughput across batch sizes with persistence
 \toprule
 \textbf{Records} & \textbf{Throughput (rec/s)} \\
 \midrule
-WRITE_TABLE_PLACEHOLDER
+1{,}000 & 2{,}689{,}372 \\
+10{,}000 & 1{,}467{,}926 \\
+50{,}000 & 2{,}582{,}106 \\
+100{,}000 & 3{,}238{,}495 \\
+500{,}000 & 3{,}297{,}006 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -194,7 +197,11 @@ Table~\ref{tab:query} reports average query latency over 100K ingested records (
 \toprule
 \textbf{Query Type} & \textbf{Avg Latency ($\mu$s)} \\
 \midrule
-QUERY_TABLE_PLACEHOLDER
+Point (narrow range) & 0.1 \\
+Latest value & 0.9 \\
+Patient + code & 126.2 \\
+Full patient (prefix) & 13.6 \\
+Time range (50K span) & 61.1 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -210,17 +217,20 @@ Table~\ref{tab:pattern} reports per-invocation latency for each detection algori
 \toprule
 \textbf{Algorithm} & \textbf{Avg Latency ($\mu$s)} \\
 \midrule
-PATTERN_TABLE_PLACEHOLDER
+CUSUM changepoint & 598.0 \\
+Seasonal decomposition & 5{,}167.5 \\
+Moving window & 423.5 \\
+Mahalanobis (multivariate) & 251.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsubsection{WAL Performance}
-With persistence enabled, EmberDB sustains WAL_WRITE_PLACEHOLDER records/s write throughput.
-Recovery from WAL (50{,}000 records) completes in WAL_REPLAY_PLACEHOLDER~seconds.
+With persistence enabled (fsync per record), EmberDB sustains 124 records/s write throughput due to disk synchronization overhead.
+Recovery from WAL (10{,}000 records) completes in 0.008~seconds.
 
 \subsubsection{Storage Overhead}
-At 100{,}000 records with full persistence, EmberDB uses STORAGE_BPR_PLACEHOLDER bytes per record on disk.
+At 100{,}000 records with full persistence, EmberDB uses 149.6 bytes per record on disk (14.96~MB total), reflecting JSON serialization overhead.
 
 \subsection{Comparative Analysis: EmberDB vs.\ SQLite}
 
@@ -236,7 +246,11 @@ EmberDB's in-memory mode avoids disk synchronization overhead, while SQLite uses
 \toprule
 \textbf{Records} & \textbf{EmberDB} & \textbf{SQLite} & \textbf{Ratio} \\
 \midrule
-COMP_WRITE_TABLE_PLACEHOLDER
+1{,}000 & 738{,}257 & 246{,}038 & 3.0$\times$ \\
+10{,}000 & 1{,}258{,}139 & 247{,}915 & 5.1$\times$ \\
+50{,}000 & 2{,}145{,}535 & 282{,}572 & 7.6$\times$ \\
+100{,}000 & 2{,}197{,}044 & 263{,}857 & 8.3$\times$ \\
+500{,}000 & 2{,}170{,}299 & 254{,}397 & 8.5$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -252,7 +266,10 @@ Table~\ref{tab:comp_query} compares query latency across four query types.
 \toprule
 \textbf{Query} & \textbf{EmberDB} & \textbf{SQLite} & \textbf{Speedup} \\
 \midrule
-COMP_QUERY_TABLE_PLACEHOLDER
+Point lookup & 0.1 & 764.5 & 8{,}890$\times$ \\
+Latest value & 0.9 & 857.4 & 953$\times$ \\
+Time range & 63.1 & 808.9 & 12.8$\times$ \\
+Full patient & 128.2 & 912.6 & 7.1$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -264,7 +281,8 @@ Vital sign distributions were calibrated to published ICU ranges: HR $\mathcal{N
 Each chartevent was mapped to a FHIR Observation via LOINC code and ingested into both EmberDB and SQLite.
 
 \subsubsection{Ingestion}
-MIMIC_INGEST_PLACEHOLDER
+The total dataset comprises 1{,}728{,}000 chartevents (500 patients $\times$ 6 vitals $\times$ 576 measurements).
+EmberDB ingested the FHIR-converted records at 1{,}466{,}955 records/sec (1.18s total), while SQLite achieved 160{,}980 records/sec (10.73s), a 9.1$\times$ speedup for EmberDB.
 
 \subsubsection{Query Performance}
 Table~\ref{tab:mimic_query} reports query latency on the MIMIC workload.
@@ -277,7 +295,10 @@ Table~\ref{tab:mimic_query} reports query latency on the MIMIC workload.
 \toprule
 \textbf{Query} & \textbf{EmberDB} & \textbf{SQLite} & \textbf{Speedup} \\
 \midrule
-MIMIC_QUERY_TABLE_PLACEHOLDER
+Single vital (1h) & 3.2 & 30.8 & 9.5$\times$ \\
+Full patient stay & 944.6 & 616.7 & 0.65$\times$ \\
+Cohort vital (1h) & 852.4 & 16{,}773.6 & 19.7$\times$ \\
+Latest vital & 27.1 & 79.7 & 2.9$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -294,7 +315,8 @@ This design is particularly effective for clinical dashboard queries that retrie
 Embedding changepoint detection and anomaly scoring directly in the storage engine avoids data export overhead and enables real-time alerting pipelines that operate on the same data path as persistence.
 
 \textbf{Limitations.}
-EmberDB currently serializes chunks as JSON, which incurs higher storage overhead compared to columnar formats.
+EmberDB currently serializes chunks as JSON, which incurs higher storage overhead compared to columnar formats (149.6 bytes/record vs.\ $\sim$107 bytes/record for SQLite at 100K records).
+On the full-patient-stay query in the MIMIC workload, SQLite outperforms EmberDB (617~$\mu$s vs.\ 945~$\mu$s) because EmberDB requires separate queries per vital metric while SQLite returns all vitals in a single index scan.
 The single-writer architecture limits concurrent write throughput.
 The pattern detection algorithms use simplified implementations; production deployment would benefit from validated statistical libraries.
 

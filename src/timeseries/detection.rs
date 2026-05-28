@@ -128,7 +128,7 @@ pub struct ChangepointResult {
     pub method: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowAnalysisPoint {
     pub window_start: i64,
     pub window_end: i64,
@@ -853,8 +853,8 @@ impl PatternDetector {
             }
             
             // Use max absolute Z-score as anomaly score (simplified approach)
-            let max_zscore = z_scores.iter()
-                .fold(0.0, |max, &z| max.max(z.abs()));
+            let max_zscore: f64 = z_scores.iter()
+                .fold(0.0f64, |m, &z| m.max(z.abs()));
                 
             if max_zscore > 3.0 { // Threshold of 3 sigma
                 outliers.push(MultivariateOutlier {

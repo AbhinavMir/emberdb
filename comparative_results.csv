@@ -1,0 +1,11 @@
+category,scale_or_type,emberdb,sqlite,ratio
+write_throughput,1000,738257,246038,3.00
+write_throughput,10000,1258139,247915,5.07
+write_throughput,50000,2145535,282572,7.59
+write_throughput,100000,2197044,263857,8.33
+write_throughput,500000,2170299,254397,8.53
+query_latency,point,0.1,764.5,8889.79
+query_latency,latest,0.9,857.4,952.71
+query_latency,time_range,63.1,808.9,12.82
+query_latency,full_patient,128.2,912.6,7.12
+storage_size,100000,0,10715136,0.00

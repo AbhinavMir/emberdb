@@ -9,6 +9,7 @@ pub mod timeseries;
 pub mod config;
 pub mod api;
 pub mod error;
+pub mod mimic;
 
 use std::collections::HashMap;
 use std::sync::RwLock;

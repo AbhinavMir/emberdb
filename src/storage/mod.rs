@@ -597,11 +597,10 @@ mod tests {
     #[test]
     fn test_basic_operations() {
         let config = create_test_config();
-        let storage = StorageEngine::new(&config).unwrap();
-        
+        let mut storage = StorageEngine::new(&config).unwrap();
+
         // Disable persistence for tests
-        let mut storage_mut = unsafe { &mut *((&storage) as *const StorageEngine as *mut StorageEngine) };
-        storage_mut.set_persistence(false);
+        storage.set_persistence(false);
 
         let record = Record {
             timestamp: 1000,
@@ -612,9 +611,9 @@ mod tests {
         };
 
         assert!(storage.insert(record.clone()).is_ok());
-        
+
         let result = storage.get_latest("test");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().value, 42.0);
+        assert_eq!(result.unwrap().unwrap().value, 42.0);
     }
 } 
