@@ -26,7 +26,7 @@
 \maketitle
 
 \begin{abstract}
-ICU monitors sample vital signs every few seconds. The standard interoperability format for those readings is HL7 FHIR Observation. General-purpose time-series databases such as InfluxDB and TimescaleDB ingest the data but drop the clinical semantics at the storage layer, which forces reconstruction at query time. \textbf{EmberDB} is a Rust time-series engine for FHIR Observation data. Records carry a composite metric key of patient identifier, LOINC code, and unit. Data is partitioned into 1-hour chunks and persisted through a write-ahead log. Five clinical pattern-detection algorithms run inside the engine: CUSUM changepoint detection, PELT segmentation, seasonal decomposition, Mahalanobis anomaly scoring, and moving-window analysis. On a synthetic MIMIC-IV workload of 500 patients, 48-hour ICU stays, and 1.7M chart\-events, EmberDB sustains 3.2M records/sec in memory mode with sub-microsecond point queries. Against a SQLite baseline on patient-scoped workloads it runs 7-9$\times$ faster on ingestion and 8{,}890$\times$ faster on point lookup.
+ICU monitors sample vital signs every few seconds. The standard interoperability format for those readings is HL7 FHIR Observation. General-purpose time-series databases such as InfluxDB and TimescaleDB ingest the data but drop the clinical semantics at the storage layer, which forces reconstruction at query time. \textbf{EmberDB} is a Rust time-series engine for FHIR Observation data. Each record carries a composite metric key of patient identifier, LOINC code, and unit, and the data is partitioned into 1-hour chunks behind a write-ahead log. The engine includes a suite of clinical pattern-detection algorithms; we benchmark four of them in this paper: CUSUM changepoint detection, seasonal decomposition, Mahalanobis anomaly scoring, and moving-window analysis (a PELT segmentation method is implemented but not yet benchmarked). On a synthetic MIMIC-IV workload of 500 patients, 48-hour ICU stays, and 1.7M chart\-events, EmberDB answers patient-scoped point lookups in single-digit microseconds. We benchmark it head to head against three baselines on the identical workload: an embedded SQLite store and two purpose-built time-series engines, InfluxDB 2.7 and TimescaleDB on PostgreSQL~16, both run in Docker. On this comparative workload EmberDB ingests $3.8$--$9.4\times$ faster than these systems (1.18M records/sec, against 0.12--0.31M for the baselines) and answers patient-scoped point lookups in single-digit microseconds, against hundreds to thousands of microseconds for the baselines. In a separate standalone micro-benchmark with persistence disabled, EmberDB reaches 3.2M records/sec in memory mode with sub-microsecond point queries; this is a different, no-baseline configuration and is not the figure behind the comparative ratios. The advantage narrows on cohort scans, where TimescaleDB is competitive, and InfluxDB stores the data far more compactly. Part of EmberDB's point-query advantage over the client-server baselines reflects its in-process library path versus their network round-trip, an axis we separate in the evaluation. All results are single-node, at a single scale, and use a synthetic schema; we report the cases where EmberDB loses alongside the cases where it wins.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -39,44 +39,36 @@ FHIR, time-series database, patient monitoring, ICU, clinical informatics
 
 ICU bedside monitors sample vital signs (heart rate, blood pressure, oxygen saturation, respiratory rate, temperature) at intervals from one second to a few minutes. Across a hospital that adds up to millions of observations per patient-day~\cite{johnson2016mimic}. HL7 FHIR has become the standard wrapper for these readings. Each measurement is an \texttt{Observation} resource carrying a LOINC-coded type, a numeric value with units, a patient reference, and a timestamp~\cite{hl7fhir}.
 
-Storing those observations efficiently \emph{without losing the clinical structure} is the open problem. InfluxDB~\cite{influxdb} and TimescaleDB~\cite{timescaledb} can absorb the throughput. What they cannot do is preserve the structured relationship between patient, observation code, and clinical context. Both flatten FHIR into generic tag/value pairs. PostgreSQL preserves schema but has no time-partitioned storage and needs expensive joins to answer temporal queries.
+The open problem is storing those observations efficiently without losing the clinical structure. InfluxDB~\cite{influxdb} and TimescaleDB~\cite{timescaledb} can absorb the throughput, but neither preserves the structured relationship between patient, observation code, and clinical context. InfluxDB flattens FHIR into measurement/tag/field triples. TimescaleDB keeps the relational schema but pays row-storage and SQL-parsing overhead on every high-frequency point lookup, and plain PostgreSQL needs joins to answer temporal queries because it has no time-partitioned storage of its own.
 
-\textbf{EmberDB} is a Rust time-series storage engine built around continuous patient monitoring. Four design decisions distinguish it.
+EmberDB is a Rust time-series storage engine built around continuous patient monitoring. Its observations carry composite metric keys that encode patient ID, LOINC code, and unit, so a patient-scoped read is a prefix match and nothing has to map back to FHIR after ingestion. Data is bucketed into configurable time chunks, one hour by default, so range scans touch only the relevant chunks and retention can drop whole chunks at once. A write-ahead log with chunk-level durability markers handles crash recovery without slowing ingestion. A set of pattern-detection algorithms runs inside the engine, on the same data path as persistence. This paper benchmarks four of them (CUSUM changepoint, seasonal decomposition, multivariate Mahalanobis anomaly detection, and moving-window analysis); a PELT segmentation method is also implemented in the engine but is not benchmarked here.
 
-\textbf{FHIR-native storage.} Observations carry composite metric keys encoding patient ID, LOINC code, and unit. Nothing has to map back to FHIR after ingestion.
-
-\textbf{Time-partitioned architecture.} Data is bucketed into configurable time chunks (one hour by default). Range scans and chunk-level retention fall out naturally.
-
-\textbf{Built-in clinical pattern detection.} CUSUM changepoint, PELT segmentation, seasonal decomposition, multivariate Mahalanobis anomaly detection, and moving-window analysis all run inside the engine.
-
-\textbf{Write-ahead log persistence.} The WAL has chunk-level durability markers, so crash recovery does not require sacrificing ingestion performance.
-
-We evaluate EmberDB on synthetic MIMIC-IV chart\-events and compare it to a SQLite baseline on identical workloads.
+We evaluate EmberDB on synthetic MIMIC-IV chart\-events and benchmark it head to head against three baselines on the identical workload: SQLite, InfluxDB 2.7, and TimescaleDB on PostgreSQL~16. We report where it wins and where it loses.
 
 %---------------------------------------------------------------------
-\section{Background and Related Work}
+\section{Background and related work}
 \label{sec:related}
 
 \subsection{Clinical time-series data}
-Clinical streams differ from IoT or infrastructure metrics in three ways that matter for storage. They are multivariate and physiologically correlated: heart rate, blood pressure, and SpO2 do not move independently. They carry semantic baggage that must be preserved end-to-end. Each value has a LOINC code, a patient reference, and clinical context. And the sampling is irregular, with measurement frequency a function of patient acuity and clinical protocol rather than a fixed cadence.
+Clinical streams differ from IoT or infrastructure metrics in ways that matter for storage. The signals are multivariate and physiologically correlated, so heart rate, blood pressure, and SpO2 do not move independently. Each value also carries semantics that have to survive end to end: a LOINC code, a patient reference, and clinical context. Sampling is irregular too, with the measurement frequency set by patient acuity and clinical protocol rather than a fixed cadence.
 
-MIMIC-IV \cite{johnson2023mimic} is the canonical reference dataset for these properties. The \texttt{chartevents} table runs to hundreds of millions of rows across thousands of ICU stays, with item IDs mapping to specific physiological measurements.
+MIMIC-IV \cite{johnson2023mimic} is the reference dataset for these properties. Its \texttt{chartevents} table runs to hundreds of millions of rows across thousands of ICU stays, with item IDs that map to specific physiological measurements.
 
 \subsection{Existing storage approaches}
-\textbf{InfluxDB} organizes data by measurement name with tag-based indexing. The design fits infrastructure monitoring well. For FHIR Observations it requires flattening into measurement/tag/field triples, which throws away the structured patient/code/value relationship.
+InfluxDB organizes data by measurement name with tag-based indexing, which suits infrastructure monitoring. Storing FHIR Observations means flattening each one into measurement/tag/field triples, and that discards the structured patient/code/value relationship.
 
-\textbf{TimescaleDB} adds time-partitioned hypertables to PostgreSQL. The relational structure survives, but row-based storage overhead and SQL parsing remain on the hot path for high-frequency point lookups.
+TimescaleDB adds time-partitioned hypertables to PostgreSQL. The relational schema survives, but row-based storage and SQL parsing stay on the hot path for high-frequency point lookups.
 
-\textbf{SQLite} is a common embedded choice for clinical applications. Its simplicity is the selling point. The lack of time-aware partitioning and the need for manual index management on temporal queries are the cost.
+SQLite is a common embedded choice for clinical applications, and its simplicity is the appeal. The cost is the absence of time-aware partitioning and the manual index management that temporal queries then require.
 
-\textbf{OpenTSDB} and \textbf{QuestDB} are purpose-built time-series stores. Both, like InfluxDB, treat every metric as a generic numeric stream with no first-class notion of healthcare resource models.
+OpenTSDB and QuestDB are purpose-built time-series stores. Like InfluxDB, both treat every metric as a generic numeric stream with no first-class notion of a healthcare resource model.
 
 %---------------------------------------------------------------------
-\section{System Design}
+\section{System design}
 \label{sec:design}
 
 \subsection{Architecture overview}
-EmberDB is written in Rust. It exposes both a library API and a REST interface (built on \texttt{warp}). Internally there are three layers: an in-memory chunk manager, a write-ahead log for durability, and a JSON chunk persistence layer.
+EmberDB is written in Rust and exposes both a library API and a REST interface built on \texttt{warp}. Internally it has three layers: an in-memory chunk manager, a write-ahead log for durability, and a JSON chunk persistence layer.
 
 \subsection{FHIR-native metric encoding}
 Each FHIR Observation becomes an internal \texttt{Record} with a composite metric name:
@@ -102,10 +94,10 @@ On recovery the engine loads the persisted chunks from disk and replays whatever
 A MIMIC-IV loader module ships with EmberDB. It maps chart\-event item IDs to FHIR LOINC codes (itemid 220045 $\rightarrow$ LOINC 8867-4 for heart rate, and so on) and turns rows into \texttt{Record} structures directly. The path is zero-copy, so there is no overhead from building intermediate FHIR JSON.
 
 %---------------------------------------------------------------------
-\section{Pattern Detection}
+\section{Pattern detection}
 \label{sec:patterns}
 
-EmberDB provides five built-in pattern detection algorithms, configured via a TOML file and operating directly on stored records.
+EmberDB provides built-in pattern detection algorithms, configured via a TOML file and operating directly on stored records. We describe five algorithms below and report measured latency for four of them in Table~\ref{tab:pattern}; the PELT segmentation method is implemented but, as it has not yet been benchmarked under the same harness, is omitted from the latency table and excluded from the head count of benchmarked algorithms.
 
 \subsection{CUSUM changepoint detection}
 The Cumulative Sum (CUSUM) algorithm maintains running sums $S^+$ and $S^-$ tracking positive and negative deviations from the series mean:
@@ -124,6 +116,7 @@ The Pruned Exact Linear Time (PELT) algorithm finds the optimal segmentation by 
 \]
 where $\mathcal{C}$ is the Gaussian negative log-likelihood cost for each segment and $\beta$ is the penalty term.
 Changepoints with magnitude below $\theta\sigma$ are pruned.
+This method is implemented in the engine but is not included in the latency benchmark of Table~\ref{tab:pattern}.
 
 \subsection{Seasonal decomposition}
 Time series are decomposed into trend $T_t$, seasonal $S_t$, and residual $R_t$ components using moving-average smoothing.
@@ -144,8 +137,15 @@ A sliding window computes per-window statistics (trend slope, volatility, or ran
 \section{Evaluation}
 \label{sec:eval}
 
-We evaluate EmberDB on three benchmark suites: standalone performance, comparative analysis against SQLite, and a synthetic MIMIC-IV workload.
-All experiments were run on an Apple Silicon machine running macOS, with EmberDB compiled in release mode (\texttt{--release}).
+We evaluate EmberDB on three benchmark suites: standalone performance, comparative analysis against SQLite, and a synthetic MIMIC-IV workload run head to head against three baselines.
+All experiments were run on a single Apple Silicon machine running macOS, with EmberDB compiled in release mode (\texttt{--release}).
+The two purpose-built baselines run in Docker on the same host: InfluxDB~2.7 (write via line protocol over HTTP, queries in Flux) and TimescaleDB on PostgreSQL~16 (bulk load via \texttt{COPY} into a one-hour hypertable, queries in SQL over a composite \texttt{(subject\_id, itemid, charttime)} index). SQLite uses WAL mode with \texttt{PRAGMA synchronous=NORMAL}. Every system ingests the same generated dataset (seed 42) and answers the same four clinical query shapes, so the numbers are comparable. The baseline harness is \texttt{benches/baseline\_bench.rs}, and every figure is recorded in \texttt{head\_to\_head\_results.csv}.
+
+\textbf{Measurement methodology and its limits.}
+The harness reports the arithmetic mean latency over a fixed number of repetitions per query (200 for EmberDB, SQLite, and TimescaleDB; 10--50 for the slower InfluxDB queries to bound wall-clock time). It does not currently record per-iteration samples, so we report means only and do \emph{not} report median, p99, or a dispersion measure; nor do we apply an explicit warmup-discard step. The microsecond-scale deltas between EmberDB and SQLite on point queries should therefore be read as order-of-magnitude indicators rather than statistically tested differences, and the lower InfluxDB iteration count makes its means correspondingly noisier. Adding an equal, larger iteration budget with warmup discard and full latency distributions is the obvious next hardening step and is left to future work.
+
+\textbf{In-process versus client-server paths.}
+The four systems do not share a client path, and this matters for interpreting the query numbers. An EmberDB query is an in-process library call with no serialization or transport. A TimescaleDB query crosses a local PostgreSQL socket and is parsed and planned as SQL. An InfluxDB query is an HTTP round-trip whose body is a Flux program compiled on every invocation. A meaningful share of the InfluxDB gap in particular --- its 4{,}949~$\mu$s single-vital point query against EmberDB's 4.0~$\mu$s --- is therefore transport and query-compilation overhead inherent to a client-server engine, not storage-layer cost, and is not the same axis of comparison as EmberDB's embedded design. We did not instrument the engines to separate the transport component numerically; readers should attribute the largest InfluxDB deltas partly to the client path rather than entirely to the storage engine.
 
 \subsection{Standalone performance}
 
@@ -154,7 +154,7 @@ Table~\ref{tab:write} shows write throughput across batch sizes with persistence
 
 \begin{table}[htbp]
 \centering
-\caption{EmberDB Write Throughput (Memory Mode)}
+\caption{EmberDB write throughput (memory mode)}
 \label{tab:write}
 \begin{tabular}{rr}
 \toprule
@@ -174,7 +174,7 @@ Table~\ref{tab:query} reports average query latency over 100K ingested records (
 
 \begin{table}[htbp]
 \centering
-\caption{EmberDB Query Latency ($\mu$s)}
+\caption{EmberDB query latency ($\mu$s)}
 \label{tab:query}
 \begin{tabular}{lr}
 \toprule
@@ -194,7 +194,7 @@ Table~\ref{tab:pattern} reports per-invocation latency for each detection algori
 
 \begin{table}[htbp]
 \centering
-\caption{Pattern Detection Latency ($\mu$s)}
+\caption{Pattern detection latency ($\mu$s)}
 \label{tab:pattern}
 \begin{tabular}{lr}
 \toprule
@@ -214,6 +214,7 @@ Recovery from WAL (10{,}000 records) completes in 0.008~seconds.
 
 \subsubsection{Storage overhead}
 At 100{,}000 records with full persistence, EmberDB uses 149.6 bytes per record on disk (14.96~MB total) due to JSON serialization overhead.
+This standalone figure is measured on a uniform 100K-record single-metric dataset by \texttt{benches/eval.rs}. The head-to-head table below (Table~\ref{tab:head2head}) reports a higher 201.4 bytes/record for the same JSON chunk format, because it is measured by a separate probe (\texttt{benches/ember\_storage\_probe.rs}) on the full 1.728M-record MIMIC workload, which spans 500 patients and 6 vitals across many one-hour chunks. The larger figure reflects the per-chunk and per-metric-key overhead that grows with the number of distinct \texttt{patient|code|unit} keys and time chunks, which the single-metric micro-benchmark does not exercise; the 201.4~B/rec measurement is the one to use for the cross-system comparison.
 
 \subsection{Comparative analysis: EmberDB vs.\ SQLite}
 
@@ -223,7 +224,7 @@ EmberDB's in-memory mode avoids disk synchronization overhead, while SQLite uses
 
 \begin{table}[htbp]
 \centering
-\caption{Write Throughput Comparison (rec/s)}
+\caption{Write throughput comparison (rec/s)}
 \label{tab:comp_write}
 \begin{tabular}{rrrr}
 \toprule
@@ -239,23 +240,7 @@ EmberDB's in-memory mode avoids disk synchronization overhead, while SQLite uses
 \end{table}
 
 \subsubsection{Query latency}
-Table~\ref{tab:comp_query} compares query latency across four query types.
-
-\begin{table}[htbp]
-\centering
-\caption{Query Latency Comparison ($\mu$s)}
-\label{tab:comp_query}
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Query} & \textbf{EmberDB} & \textbf{SQLite} & \textbf{Speedup} \\
-\midrule
-Point lookup & 0.1 & 764.5 & 8{,}890$\times$ \\
-Latest value & 0.9 & 857.4 & 953$\times$ \\
-Time range & 63.1 & 808.9 & 12.8$\times$ \\
-Full patient & 128.2 & 912.6 & 7.1$\times$ \\
-\bottomrule
-\end{tabular}
-\end{table}
+On a uniform 100K-record micro-benchmark, the gap over SQLite is widest where the workload is purely patient-scoped: a point lookup runs in 0.1~$\mu$s vs.\ 764.5~$\mu$s ($8{,}890\times$) and a latest-value read in 0.9~$\mu$s vs.\ 857.4~$\mu$s ($953\times$). It narrows on scans, to $12.8\times$ on a time range and $7.1\times$ on a full-patient read, where both engines touch more records. The sub-microsecond point-query figure (0.1~$\mu$s) is specific to this uniform standalone setting; on the more realistic MIMIC workload below the same query shape costs 4.0~$\mu$s, and that single-digit-microsecond figure, not the sub-microsecond one, is the appropriate point of comparison against the purpose-built engines. The MIMIC results below show the same shape against those engines.
 
 \subsection{MIMIC-IV synthetic workload}
 
@@ -265,26 +250,53 @@ Each chartevent was mapped to a FHIR Observation via LOINC code and ingested int
 
 \subsubsection{Ingestion}
 The dataset contains 1{,}728{,}000 chartevents (500 patients $\times$ 6 vitals $\times$ 576 measurements).
-EmberDB ingested the FHIR-converted records at 1{,}466{,}955 records/sec (1.18s total). SQLite achieved 160{,}980 records/sec (10.73s), a 9.1$\times$ speedup for EmberDB.
+EmberDB ingested the FHIR-converted records at 1{,}176{,}849 records/sec (1.47s total). On the same data, SQLite reached 124{,}863 records/sec, TimescaleDB 309{,}707 records/sec via \texttt{COPY}, and InfluxDB 287{,}412 records/sec via the line protocol. EmberDB is $9.4\times$ faster than SQLite and $3.8\times$ faster than TimescaleDB, the fastest of the purpose-built baselines on ingestion.
+This 1.18M records/sec is the comparative, apples-to-apples figure against which the $3.8$--$9.4\times$ ratios are computed. It is lower than the 3.2M records/sec of the standalone memory-mode micro-benchmark in Table~\ref{tab:write} because that micro-benchmark runs with persistence disabled and no baseline alongside it; the two figures describe different configurations and should not be conflated.
 
 \subsubsection{Query performance}
-Table~\ref{tab:mimic_query} reports query latency on the MIMIC workload.
+Table~\ref{tab:mimic_query} reports query latency for the same four query shapes on each system.
 
 \begin{table}[htbp]
 \centering
-\caption{MIMIC-IV Query Latency ($\mu$s)}
+\caption{MIMIC-IV query latency ($\mu$s), EmberDB vs.\ SQLite}
 \label{tab:mimic_query}
 \begin{tabular}{lrrr}
 \toprule
 \textbf{Query} & \textbf{EmberDB} & \textbf{SQLite} & \textbf{Speedup} \\
 \midrule
-Single vital (1h) & 3.2 & 30.8 & 9.5$\times$ \\
-Full patient stay & 944.6 & 616.7 & 0.65$\times$ \\
-Cohort vital (1h) & 852.4 & 16{,}773.6 & 19.7$\times$ \\
-Latest vital & 27.1 & 79.7 & 2.9$\times$ \\
+Single vital (1h) & 4.0 & 37.1 & 9.3$\times$ \\
+Full patient stay & 1{,}145.9 & 746.9 & 0.65$\times$ \\
+Cohort vital (1h) & 967.9 & 21{,}191.0 & 21.9$\times$ \\
+Latest vital & 31.3 & 96.5 & 3.1$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsubsection{Head-to-head against purpose-built engines}
+Table~\ref{tab:head2head} places all four systems side by side on the MIMIC workload: write throughput, the four query latencies, and on-disk storage. Lower is better for every row except ingestion.
+
+\begin{table}[htbp]
+\centering
+\caption{Head-to-head on the synthetic MIMIC-IV workload (1.728M records). Ingestion in records/sec (higher is better); query latency in $\mu$s and storage in bytes/record (lower is better).}
+\label{tab:head2head}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Metric} & \textbf{EmberDB} & \textbf{SQLite} & \textbf{TimescaleDB} & \textbf{InfluxDB} \\
+\midrule
+Ingest (rec/s) & \textbf{1{,}176{,}849} & 124{,}863 & 309{,}707 & 287{,}412 \\
+\midrule
+Single vital (1h) & \textbf{4.0} & 37.1 & 561.6 & 4{,}949 \\
+Full patient stay & 1{,}145.9 & \textbf{746.9} & 3{,}628 & 13{,}913 \\
+Cohort vital (1h) & 967.9 & 21{,}191 & \textbf{847.3} & 12{,}692 \\
+Latest vital & \textbf{31.3} & 96.5 & 2{,}466 & 4{,}618 \\
+\midrule
+Storage (B/rec) & 201.4 & 103.1 & 129.6 & \textbf{26.8} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The two patient-scoped point queries follow the same pattern. EmberDB wins ingestion and both the single-vital and latest-vital lookups by one to three orders of magnitude over the purpose-built engines, because each reduces to a prefix match on an in-memory chunk with no SQL parsing. The single-vital lookup runs 140$\times$ faster than TimescaleDB and over 1{,}200$\times$ faster than InfluxDB. These large multiples should be read with the client-path caveat above: EmberDB's lookup is an in-process call, while the TimescaleDB and especially the InfluxDB figures include socket or HTTP transport and, for InfluxDB, Flux compilation on every iteration, so part of the gap is the embedded-versus-client-server axis rather than the storage engine alone. TimescaleDB is the strongest baseline, and it wins the cohort scan: its item-indexed hypertable answers a one-shot range query while EmberDB iterates 500 per-patient metrics. InfluxDB is slowest on every query in this point/range mix, which suits its tag-cardinality model poorly --- though this mix omits the time-bucketed downsampling and multi-tag aggregation queries that InfluxDB and TimescaleDB are built for, so the comparison understates them (see the scope discussion below). InfluxDB does store the data more compactly: TSM columnar compression yields 26.8 bytes/record against EmberDB's 201.4, a $7.5\times$ gap. The JSON chunk format is what pays for that gap, and the full-patient-stay query remains EmberDB's weakest case for the reason given in the SQLite comparison.
 
 %---------------------------------------------------------------------
 \section{Discussion}
@@ -297,11 +309,14 @@ The design fits clinical dashboard queries that retrieve all vitals for a single
 \textbf{Pattern detection at the storage layer.}
 Embedding changepoint detection and anomaly scoring directly in the storage engine avoids data export overhead. Real-time alerting pipelines can operate on the same data path as persistence.
 
-\textbf{Limitations.}
-EmberDB currently serializes chunks as JSON, which has higher storage overhead than columnar formats (149.6 bytes/record vs.\ $\sim$107 bytes/record for SQLite at 100K records).
-On the full-patient-stay query in the MIMIC workload, SQLite outperforms EmberDB (617~$\mu$s vs.\ 945~$\mu$s) because EmberDB issues separate queries per vital metric while SQLite returns all vitals in a single index scan.
-The single-writer architecture limits concurrent write throughput.
-The pattern detection algorithms use simplified implementations; production deployment would need validated statistical libraries.
+\textbf{Where EmberDB loses.}
+The JSON chunk format is the main weakness. On the MIMIC workload it costs 201.4 bytes/record on disk, against 129.6 for TimescaleDB, 103.1 for SQLite, and 26.8 for InfluxDB, whose TSM columnar compression is $7.5\times$ more compact. Two query shapes also go against EmberDB. On the full-patient-stay query SQLite wins (747~$\mu$s vs.\ 1{,}146~$\mu$s) because EmberDB issues a separate range query per vital metric while SQLite returns every vital in one index scan. On the cohort scan TimescaleDB wins (847~$\mu$s vs.\ 968~$\mu$s) for the same structural reason: its item-indexed hypertable answers the window in a single query rather than 500 per-patient lookups. Both follow from the prefix-keyed layout, and a columnar chunk format with a multi-metric range API would address them.
+
+\textbf{Other limitations.}
+The single-writer architecture limits concurrent write throughput. The pattern-detection algorithms use simplified implementations; a production deployment would need validated statistical libraries.
+
+\textbf{Scope of the evaluation.}
+Every measurement here is single-node, at a single scale, and uses a synthetic schema. The entire cross-system comparison is one 1.728M-record point at one cardinality on one Apple Silicon host; we have not run it at a second scale or on real MIMIC-IV \texttt{chartevents}, so claims that the ordering generalizes are hypotheses, not results. The workload is generated from published ICU vital-sign distributions rather than real \texttt{chartevents}, and all four systems ran on one machine, so the numbers capture single-host engine behavior, not clustered or networked deployment. Because the systems are exercised through different client paths --- an in-process call for EmberDB versus a socket or HTTP round-trip for the server engines --- the query-latency multiples conflate storage-engine cost with transport and query-compilation overhead, and we did not separate the two numerically. The point/range query mix also favors a prefix-keyed store and omits the analytical scans (time-bucketed downsampling, multi-tag aggregation, gap-fill) that InfluxDB and TimescaleDB are tuned for; adding one or two such queries is needed before the head-to-head can be called balanced, and we flag the current mix as tilted toward EmberDB. We therefore frame the relative ordering as a hypothesis to be confirmed: a second scale, a real-data run, and the missing analytical query shapes would each de-risk it, and the absolute figures and the storage gap in particular would shift with a columnar format and a real workload.
 
 \textbf{Future work.}
 Planned improvements include columnar chunk encoding (e.g., Parquet), concurrent chunk writers with sharded locking, integration with FHIR Subscription for push-based alerts, and support for FHIR Bulk Data export.
@@ -311,7 +326,11 @@ Planned improvements include columnar chunk encoding (e.g., Parquet), concurrent
 \label{sec:conclusion}
 
 EmberDB shows that high ingest throughput and native clinical semantics are not mutually exclusive. Encoding patient identity and LOINC codes into the storage key, partitioning the data into time-aligned chunks, and integrating the pattern-detection algorithms directly yields a system that handles continuous patient monitoring without giving up time-series performance.
-On synthetic MIMIC-IV workloads it is competitive with SQLite, with richer query semantics and no post-hoc data transformation.
+On the synthetic MIMIC-IV workload it ingests $3.8$--$9.4\times$ faster than SQLite, TimescaleDB, and InfluxDB and answers patient-scoped point queries in single-digit microseconds, while preserving FHIR structure with no post-hoc transformation. It is not uniformly faster: TimescaleDB matches it on cohort scans and InfluxDB stores the data in a fraction of the space, both of which point to the columnar chunk format as the next step. These results come from a single synthetic scale on one host, measured as means without latency distributions and through engine-specific client paths, so we present the ordering as a hypothesis: confirming it calls for a second scale, a real-data run, the analytical query shapes the current mix omits, and full latency distributions over an equal iteration budget.
+
+%---------------------------------------------------------------------
+\section*{AI-usage disclosure}
+The author used a large language model (Anthropic Claude) as a coding and writing assistant. Its role covered scaffolding and debugging the Rust benchmark harnesses (including the InfluxDB and TimescaleDB baseline drivers), drafting and editing prose, and formatting tables. All system design, experimental decisions, and benchmark execution were directed by the author, and every reported number was produced by running the code on the author's hardware and verified against the committed CSV artifacts. The author takes full responsibility for the content.
 
 \begin{thebibliography}{10}
 

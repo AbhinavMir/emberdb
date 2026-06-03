@@ -46,6 +46,38 @@ cargo build
 cargo test
 ```
 
+## Benchmarks
+
+Head-to-head results on the synthetic MIMIC-IV workload (500 patients, 48h ICU
+stays, 6 vitals @ 5-min cadence, 1,728,000 chartevents, seed 42) are in
+`head_to_head_results.csv`. EmberDB is compared against SQLite, TimescaleDB
+(PostgreSQL 16) and InfluxDB 2.7, the last two run in Docker. All numbers are
+single-node on one Apple Silicon host and use a synthetic schema.
+
+| Metric | EmberDB | SQLite | TimescaleDB | InfluxDB |
+|---|---|---|---|---|
+| Ingest (rec/s) | **1,176,849** | 124,863 | 309,707 | 287,412 |
+| Single vital 1h (us) | **4.0** | 37.1 | 561.6 | 4,949 |
+| Full patient stay (us) | 1,145.9 | **746.9** | 3,628 | 13,913 |
+| Cohort vital 1h (us) | 967.9 | 21,191 | **847.3** | 12,692 |
+| Latest vital (us) | **31.3** | 96.5 | 2,466 | 4,618 |
+| Storage (B/rec) | 201.4 | 103.1 | 129.6 | **26.8** |
+
+EmberDB wins ingestion and patient-scoped point queries; TimescaleDB wins the
+cohort scan and InfluxDB stores the data far more compactly. Reproduce with:
+
+```bash
+# Start the purpose-built baselines
+docker run -d --name influx-bench -p 8087:8086 influxdb:2.7
+docker run -d --name tsdb-bench -e POSTGRES_PASSWORD=pw -p 5433:5432 timescale/timescaledb:latest-pg16
+# (one-time InfluxDB setup: org=emberbench, bucket=vitals, token in benches/baseline_bench.rs)
+
+cargo build --release --bins
+./target/release/mimic_bench          # EmberDB vs SQLite -> mimic_bench_results.csv
+./target/release/baseline_bench       # InfluxDB + TimescaleDB -> baseline_results.csv
+./target/release/ember_storage_probe  # EmberDB on-disk B/rec
+```
+
 ## Current Status
 
 EmberDB is currently in early development. 
