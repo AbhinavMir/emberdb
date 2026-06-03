@@ -22,3 +22,11 @@ Thumbs.db
 *.log
 
 data/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.out

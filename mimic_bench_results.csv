@@ -1,7 +1,7 @@
 category,metric,emberdb,sqlite,ratio,detail
-ingest,throughput,1170196,124863,9.37,1728000
-query,single_vital_1h,4.1,36.9,8.99,200
-query,full_patient_stay,1142.2,746.4,0.65,200
-query,cohort_vital_1h,927.4,21369.5,23.04,10
-query,latest_vital,30.5,95.7,3.14,200
+ingest,throughput,1392023,144145,9.66,1728000
+query,single_vital_1h,3.5,32.7,9.23,200
+query,full_patient_stay,977.9,1524.0,1.56,200
+query,cohort_vital_1h,1145.7,18945.1,16.54,10
+query,latest_vital,28.5,84.2,2.95,200
 storage,bytes,0,178151424,0.00,1728000
