@@ -41,6 +41,7 @@ fn generate(n_patients: usize, seed: u64) -> Vec<ChartEvent> {
                     subject_id, hadm_id: Some(20000 + p as i64), stay_id: Some(30000 + p as i64),
                     charttime, itemid: *itemid, value: Some(format!("{:.1}", val)),
                     valuenum: Some(val), valueuom: itemid_to_loinc(*itemid).map(|(_, _, u)| u.to_string()),
+                    ..Default::default()
                 });
             }
         }

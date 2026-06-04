@@ -107,6 +107,26 @@ gunzip -kf /tmp/mimic-demo/mimic-iv-clinical-database-demo-2.2/icu/chartevents.c
 cargo run --release --bin mimic_real_bench   # -> mimic_demo_results.csv
 ```
 
+### Chartevents schema (synthetic == real shape)
+
+The synthetic generator and the real loader now use the **same 11-column
+MIMIC-IV `chartevents` schema** with human-readable timestamps:
+
+```
+subject_id,hadm_id,stay_id,caregiver_id,charttime,storetime,itemid,value,valuenum,valueuom,warning
+```
+
+`mimic_bench` writes its synthetic data to `/tmp/emberdb_synth_chartevents.csv`
+with `charttime`/`storetime` as `YYYY-MM-DD HH:MM:SS` strings, byte-identical in
+header to the real demo file. One loader, `mimic::parse_chartevents_csv`, reads
+both: `mimic::parse_charttime` accepts either an integer Unix epoch (legacy
+synthetic) or an ISO datetime string (real MIMIC), and the parser dispatches on
+column count (11 = real, 8 = legacy). Verified end-to-end: the production loader
+parses the real demo file to the same 78,441 mapped vitals the bespoke driver
+produced. The remaining synthetic/real difference is in the *data* (clean 5-min
+Gaussian over ~3.5 days vs irregular ~hourly over a ~90-year de-identified span),
+not the schema.
+
 ## Current Status
 
 EmberDB is currently in early development. 

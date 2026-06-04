@@ -119,12 +119,15 @@ fn parse_real_chartevents(path: &str) -> Vec<ChartEvent> {
         let subject_id = match f[0].trim().parse::<i64>() { Ok(v) => v, Err(_) => continue };
         let hadm_id = f[1].trim().parse::<i64>().ok();
         let stay_id = f[2].trim().parse::<i64>().ok();
+        let caregiver_id = f[3].trim().parse::<i64>().ok();
         let charttime = match iso_to_epoch(&f[4]) { Some(v) => v, None => continue };
+        let storetime = iso_to_epoch(&f[5]);
         let itemid = match f[6].trim().parse::<i64>() { Ok(v) => v, Err(_) => continue };
         let value = { let v = f[7].trim(); if v.is_empty() { None } else { Some(v.to_string()) } };
         let valuenum = f[8].trim().parse::<f64>().ok();
         let valueuom = { let v = f[9].trim(); if v.is_empty() { None } else { Some(v.to_string()) } };
-        events.push(ChartEvent { subject_id, hadm_id, stay_id, charttime, itemid, value, valuenum, valueuom });
+        let warning = f.get(10).and_then(|w| w.trim().parse::<i64>().ok());
+        events.push(ChartEvent { subject_id, hadm_id, stay_id, caregiver_id, charttime, storetime, itemid, value, valuenum, valueuom, warning });
     }
     events
 }

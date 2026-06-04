@@ -83,6 +83,7 @@ fn generate_synthetic_chartevents(n_patients: usize, seed: u64) -> Vec<ChartEven
                     value: Some(format!("{:.1}", val)),
                     valuenum: Some(val),
                     valueuom: itemid_to_loinc(*itemid).map(|(_, _, u)| u.to_string()),
+                    ..Default::default()
                 });
             }
         }

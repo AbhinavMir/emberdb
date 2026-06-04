@@ -71,11 +71,14 @@ fn generate_synthetic_chartevents(n_patients: usize, seed: u64) -> Vec<ChartEven
                     subject_id,
                     hadm_id: Some(hadm_id),
                     stay_id: Some(stay_id),
+                    caregiver_id: Some(40000 + (p as i64 % 50)), // synthetic caregiver pool
                     charttime,
+                    storetime: Some(charttime + 60), // charted ~1 min after observation
                     itemid: *itemid,
                     value: Some(format!("{:.1}", val)),
                     valuenum: Some(val),
                     valueuom: itemid_to_loinc(*itemid).map(|(_, _, u)| u.to_string()),
+                    warning: Some(0),
                 });
             }
         }
@@ -117,6 +120,14 @@ fn main() {
     let events = generate_synthetic_chartevents(n_patients, 42);
     let total_events = events.len();
     println!("Generated {} chartevents\n", total_events);
+
+    // Emit the synthetic data in the real MIMIC-IV 11-column shape with
+    // human-readable `YYYY-MM-DD HH:MM:SS` timestamps, so it is byte-compatible
+    // with the real loader and can be inspected / diffed against the demo file.
+    let synth_csv = "/tmp/emberdb_synth_chartevents.csv";
+    emberdb::mimic::write_chartevents_csv(synth_csv, &events)
+        .expect("failed to write synthetic chartevents CSV");
+    println!("Wrote synthetic chartevents (real MIMIC 11-col shape) to {}\n", synth_csv);
 
     // Convert to EmberDB records
     let records: Vec<Record> = events.iter().filter_map(chartevent_to_record).collect();
