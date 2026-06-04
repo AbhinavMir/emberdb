@@ -56,12 +56,12 @@ single-node on one Apple Silicon host and use a synthetic schema.
 
 | Metric | EmberDB | SQLite | TimescaleDB | InfluxDB |
 |---|---|---|---|---|
-| Ingest (rec/s) | **1,176,849** | 124,863 | 309,707 | 287,412 |
-| Single vital 1h (us) | **4.0** | 37.1 | 561.6 | 4,949 |
-| Full patient stay (us) | 1,145.9 | **746.9** | 3,628 | 13,913 |
-| Cohort vital 1h (us) | 967.9 | 21,191 | **847.3** | 12,692 |
-| Latest vital (us) | **31.3** | 96.5 | 2,466 | 4,618 |
-| Storage (B/rec) | 201.4 | 103.1 | 129.6 | **26.8** |
+| Ingest (rec/s) | **1,424,089** | 151,113 | 363,352 | 301,453 |
+| Single vital 1h (us) | **3.3** | 31.0 | 531.3 | 5,383 |
+| Full patient stay (us) | 955.9 | **624.8** | 3,078 | 13,167 |
+| Cohort vital 1h (us) | 817.1 | 18,525 | **751.8** | 12,073 |
+| Latest vital (us) | **28.1** | 80.5 | 1,178 | 4,226 |
+| Storage (B/rec) | 201.4 | 103.1 | 129.3 | **26.8** |
 
 EmberDB wins ingestion and patient-scoped point queries; TimescaleDB wins the
 cohort scan and InfluxDB stores the data far more compactly. Reproduce with:

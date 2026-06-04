@@ -1,8 +1,8 @@
 metric,unit,emberdb,sqlite,timescaledb,influxdb
-ingest_throughput,rec/s,1176849,124863,309707,287412
-query_single_vital_1h,us,4.0,37.1,561.6,4948.5
-query_full_patient_stay,us,1145.9,746.9,3628.3,13912.7
-query_cohort_vital_1h,us,967.9,21191.0,847.3,12691.5
-query_latest_vital,us,31.3,96.5,2466.4,4618.2
-storage_bytes_per_record,bytes,201.4,103.1,129.6,26.8
-storage_total_mb,MB,331.9,169.9,213.6,44.1
+ingest_throughput,rec/s,1424089,151113,363352,301453
+query_single_vital_1h,us,3.3,31.0,531.3,5383.3
+query_full_patient_stay,us,955.9,624.8,3078.4,13166.7
+query_cohort_vital_1h,us,817.1,18524.6,751.8,12072.9
+query_latest_vital,us,28.1,80.5,1177.9,4225.8
+storage_bytes_per_record,bytes,201.4,103.1,129.3,26.8
+storage_total_mb,MB,348.0,178.2,223.4,46.4
