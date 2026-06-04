@@ -370,9 +370,6 @@ EmberDB shows that high ingest throughput and native clinical semantics are not 
 On the synthetic MIMIC-IV workload it ingests $3.8$--$9.4\times$ faster than SQLite, TimescaleDB, and InfluxDB and answers patient-scoped point queries in single-digit microseconds, while preserving FHIR structure with no post-hoc transformation. It is not uniformly faster: TimescaleDB matches it on cohort scans and InfluxDB stores the data in a fraction of the space, both of which point to the columnar chunk format as the next step. These results come from a single synthetic scale on one host, measured as means without latency distributions and through engine-specific client paths, so we present the ordering as a hypothesis: confirming it calls for a second scale, a real-data run, the analytical query shapes the current mix omits, and full latency distributions over an equal iteration budget.
 
 %---------------------------------------------------------------------
-\section*{AI-usage disclosure}
-The author used a large language model (Anthropic Claude) as a coding and writing assistant. Its role covered scaffolding and debugging the Rust benchmark harnesses (including the InfluxDB and TimescaleDB baseline drivers), drafting and editing prose, and formatting tables. All system design, experimental decisions, and benchmark execution were directed by the author, and every reported number was produced by running the code on the author's hardware and verified against the committed CSV artifacts. The author takes full responsibility for the content.
-
 \begin{thebibliography}{10}
 
 \bibitem{johnson2016mimic}
