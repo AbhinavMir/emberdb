@@ -48,8 +48,8 @@ cargo test
 
 ## Benchmarks
 
-Head-to-head results on the synthetic MIMIC-IV workload (500 patients, 48h ICU
-stays, 6 vitals @ 5-min cadence, 1,728,000 chartevents, seed 42) are in
+Head-to-head results on the MIMIC-IV-schema synthetic workload (500 patients, 48h
+ICU stays, 6 vitals @ 5-min cadence, 1,728,000 chartevents, seed 42) are in
 `head_to_head_results.csv`. EmberDB is compared against SQLite, TimescaleDB
 (PostgreSQL 16) and InfluxDB 2.7, the last two run in Docker. All numbers are
 single-node on one Apple Silicon host and use a synthetic schema.
@@ -76,6 +76,35 @@ cargo build --release --bins
 ./target/release/mimic_bench          # EmberDB vs SQLite -> mimic_bench_results.csv
 ./target/release/baseline_bench       # InfluxDB + TimescaleDB -> baseline_results.csv
 ./target/release/ember_storage_probe  # EmberDB on-disk B/rec
+```
+
+### Real MIMIC-IV demo benchmark
+
+The same four systems are also benchmarked on the **real**, open-access MIMIC-IV
+Clinical Database Demo v2.2 (~100 patients, Open Data Commons ODbL, no
+credentialing). The driver `benches/mimic_real_bench.rs` ingests the 78,441
+mapped vital-sign rows from `icu/chartevents.csv` and runs the same four query
+shapes; results are in `mimic_demo_results.csv` and `mimic_demo_report.md`.
+
+| Metric | EmberDB | SQLite | TimescaleDB | InfluxDB |
+|---|---|---|---|---|
+| Ingest (rec/s) | **1,944,141** | 236,602 | 158,006 | 328,673 |
+| Single vital 1h (us) | **0.5** | 142.6 | 554.7 | 4,758 |
+| Cohort vital 1h (us) | **155.9** | 2,760 | 427.9 | 4,007 |
+| Full patient stay (us) | 4,334 | **1,687** | 2,151 | 14,546 |
+| Latest vital (us) | 7,538 | **165.0** | 1,768 | 4,758 |
+
+The ingest and point/cohort-query wins hold on real data; `latest_vital` and
+`full_patient_stay` regress because the de-identified MIMIC timestamps span ~90
+years, scattering EmberDB's hourly chunks. Full MIMIC-IV (vs the demo subset)
+needs PhysioNet credentialed access and is left for future validation.
+
+```bash
+curl -sSL -o /tmp/mimic-demo.zip \
+  https://physionet.org/static/published-projects/mimic-iv-demo/mimic-iv-clinical-database-demo-2.2.zip
+unzip -o /tmp/mimic-demo.zip "*/icu/chartevents.csv.gz" -d /tmp/mimic-demo
+gunzip -kf /tmp/mimic-demo/mimic-iv-clinical-database-demo-2.2/icu/chartevents.csv.gz
+cargo run --release --bin mimic_real_bench   # -> mimic_demo_results.csv
 ```
 
 ## Current Status

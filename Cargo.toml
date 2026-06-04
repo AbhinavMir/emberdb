@@ -26,6 +26,10 @@ name = "mimic_bench"
 path = "benches/mimic_bench.rs"
 
 [[bin]]
+name = "mimic_real_bench"
+path = "benches/mimic_real_bench.rs"
+
+[[bin]]
 name = "baseline_bench"
 path = "benches/baseline_bench.rs"
 
