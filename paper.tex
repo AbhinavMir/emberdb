@@ -1,4 +1,4 @@
-\documentclass[conference]{IEEEtran}
+\documentclass[journal]{IEEEtran}
 \usepackage{cite}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{graphicx}
@@ -399,6 +399,10 @@ Planned improvements include columnar chunk encoding (e.g., Parquet), concurrent
 
 EmberDB combines high ingest throughput with native clinical semantics. Encoding patient identity and LOINC codes into the storage key, partitioning the data into time-aligned chunks, and integrating the pattern-detection algorithms directly yields a system that handles continuous patient monitoring while retaining time-series performance.
 On the MIMIC-IV-schema synthetic workload it ingests $3.9$--$9.4\times$ faster than SQLite, TimescaleDB, and InfluxDB and answers patient-scoped point queries in single-digit microseconds, while preserving FHIR structure with no post-hoc transformation, and the ingest and point/cohort-query advantages reproduce on the real, open-access MIMIC-IV demo. EmberDB is not faster on every operation: TimescaleDB is competitive on cohort scans and InfluxDB stores the data far more compactly, both of which point to the columnar chunk format as the next step, and the real-demo run further exposed a latest-value and full-stay regression under realistically spread timestamps. These results come from one host, measured as means without latency distributions and through engine-specific client paths, so we present the ordering as a hypothesis that the real-demo run partially confirms; hardening it calls for a second synthetic scale, validation on full credentialed MIMIC-IV, the analytical query shapes the current mix omits, and full latency distributions over an equal iteration budget.
+
+%---------------------------------------------------------------------
+\section*{Acknowledgment}
+The author used a generative AI assistant solely for language editing (grammar and sentence structure). All research, implementation, benchmarking, analysis, and conclusions are the author's own original work; the author reviewed and verified the entire manuscript and takes full responsibility for its content.
 
 %---------------------------------------------------------------------
 \begin{thebibliography}{10}
